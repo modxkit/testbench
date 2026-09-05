@@ -4,10 +4,14 @@ name: tests
 # `pull_request` — a double run on every push to a branch with an open PR. Branches are checked
 # through PRs; only the main branch is left in `push`, so that the state of `main` stays visible
 # after a merge as well.
+# `workflow_dispatch` is here for the case this repository met on its first day: the matrix could
+# not be started at all without pushing code, and a repository whose Actions had just been switched
+# on had no event to replay. The sibling workflow `testbench-selftest.yml` already had it.
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 # Not a decoration: without this block the jobs get GITHUB_TOKEN with the repository's default
 # scope, which in many repositories is read/write. No step of this workflow writes anything back to
