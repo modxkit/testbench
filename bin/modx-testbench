@@ -1,0 +1,51 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use ModxKit\Testbench\Console\DestroyCommand;
+use ModxKit\Testbench\Console\InstallCommand;
+use ModxKit\Testbench\Console\SnapshotCommand;
+use ModxKit\Testbench\Console\StatusCommand;
+use Symfony\Component\Console\Application;
+
+$autoloadCandidates = [__DIR__ . '/../vendor/autoload.php', __DIR__ . '/../../../autoload.php'];
+$autoloaded = false;
+
+foreach ($autoloadCandidates as $autoload) {
+    if (is_file($autoload)) {
+        require_once $autoload;
+        $autoloaded = true;
+        break;
+    }
+}
+
+// Without this branch the loop failed silently, and the first thing to die was the
+// `new Application(...)` below: `Fatal error: Class "Symfony\Component\Console\Application" not
+// found`, rc=255. The diagnosis sent people looking for symfony/console, whereas the cause is always
+// the same one — the dependencies are not installed.
+if (!$autoloaded) {
+    fwrite(STDERR, sprintf(
+        'modx-testbench: the Composer autoloader was not found — run `composer install` in the '
+        . "project.\nLooked in: %s\n",
+        implode(', ', $autoloadCandidates)
+    ));
+
+    exit(1);
+}
+
+$application = new Application('modx-testbench');
+
+// `addCommands()`, not four `add()` calls: Symfony 8 REMOVED `Application::add()` (deprecated in
+// 7.4 in favour of `addCommand()`), and `addCommand()` in turn does not exist in the 6.4 floor this
+// package declares. `addCommands()` is the only one of the three present across the whole declared
+// range and deprecated nowhere in it — measured on the upstream source of v6.4.0, v7.0.0, v8.0.0
+// and v8.1.6, one occurrence in each. Version sniffing at this call site would therefore be
+// ceremony, not portability.
+$application->addCommands([
+    new InstallCommand(),
+    new StatusCommand(),
+    new DestroyCommand(),
+    new SnapshotCommand(),
+]);
+$application->run();

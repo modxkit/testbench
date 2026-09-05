@@ -1,0 +1,33 @@
+{
+    "name": "modxkit/reusable-workflow-consumer",
+    "description": "Fixture consumer: exists so that .github/workflows/testbench.yml — the reusable workflow this package HANDS to third-party extras — is executed by a real CI run instead of being shipped unrun. Not part of the distribution (.gitattributes).",
+    "type": "project",
+    "license": "MIT",
+    "require-dev": {
+        "modxkit/testbench": "*"
+    },
+    "repositories": [
+        {
+            "type": "path",
+            "url": "../..",
+            "options": {
+                "symlink": false
+            }
+        }
+    ],
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "autoload-dev": {
+        "psr-4": {
+            "ModxKit\\Testbench\\ReusableWorkflowConsumer\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": [
+            "@test:unit",
+            "@test:integration"
+        ],
+        "test:unit": "phpunit --testsuite unit",
+        "test:integration": "phpunit --testsuite integration"
+    }
+}

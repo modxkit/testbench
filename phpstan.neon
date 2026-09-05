@@ -1,0 +1,20 @@
+parameters:
+    level: max
+    paths:
+        - bin/modx-testbench
+        # Files in the package root: bootstrap.php is the public entry point (it is what the
+        # consumer's phpunit.xml wires in), the other two are tool configurations.
+        # None of the three used to be covered here, nor in cs-fixer, nor in Rector.
+        - .php-cs-fixer.dist.php
+        - bootstrap.php
+        - rector.php
+        - src
+        - tests
+    # The MODX core is installed into the working directory at run time and is not a Composer
+    # dependency, so the declarations of its classes live in stubs/ and are only scanned.
+    scanDirectories:
+        - stubs
+    treatPhpDocTypesAsCertain: false
+
+includes:
+    - vendor/phpstan/phpstan-phpunit/extension.neon

@@ -1,0 +1,136 @@
+name: modxkit/testbench
+
+# Reusable workflow for third-party extras. Wire it up like this:
+#
+#   jobs:
+#     tests:
+#       uses: modxkit/testbench/.github/workflows/testbench.yml@v1
+#       with:
+#         php-versions: '["8.2","8.3","8.4"]'
+#         modx-versions: '["3.1.2-pl","3.2.3-pl"]'
+#
+# The values are REAL JSON, in double quotes: they are fed to `fromJson()` below. The form
+# `"['8.2','8.3']"` is not JSON; today's GitHub parser accepts it, but leaning on the parser's
+# leniency in a file consumers copy into their own repositories is not something to rely on.
+#
+# This file has to live in `.github/workflows/` and nowhere else. GitHub resolves
+# `workflow_call` exclusively from `.github/workflows/` of the called repository — at any other
+# path, `ci/github/testbench.yml` for one, this workflow would be non-functional by construction,
+# and the address above, the one consumers are given, would not resolve at all.
+
+on:
+  workflow_call:
+    inputs:
+      php-versions:
+        type: string
+        # Real JSON — see the explanation in the file header.
+        default: '["8.2","8.3","8.4"]'
+      modx-versions:
+        type: string
+        default: '["3.2.3-pl"]'
+      working-directory:
+        type: string
+        default: '.'
+
+# A called workflow inherits the GITHUB_TOKEN of the CALLING repository, whose default scope this
+# package knows nothing about; `permissions` in a called workflow can only NARROW what it inherited,
+# never widen it. Nothing here writes back to the repository — the steps are checkout, setup-php,
+# cache, apt-get, composer and the package's own binary — so read is all this workflow ever needs.
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: "PHP ${{ matrix.php }} / MODX ${{ matrix.modx }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ${{ fromJson(inputs.php-versions) }}
+        modx: ${{ fromJson(inputs.modx-versions) }}
+    services:
+      db:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testbench
+          MYSQL_DATABASE: modx_testbench
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -ptestbench"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      MODX_TESTBENCH_VERSION: ${{ matrix.modx }}
+      MODX_TESTBENCH_DB_HOST: 127.0.0.1
+      MODX_TESTBENCH_DB_PORT: '3306'
+      MODX_TESTBENCH_DB_USER: root
+      MODX_TESTBENCH_DB_PASS: testbench
+      MODX_TESTBENCH_CACHE_DIR: ${{ github.workspace }}/.modx-cache
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: zip, pdo_mysql
+          coverage: none
+      # Without the mysql/mysqldump clients `SnapshotManager::pickDumper()`
+      # SILENTLY falls back to `PhpDumper`. For a consumer that is not a failure (snapshots keep
+      # working), but test isolation then goes down a different, slower and less complete branch —
+      # `PhpDumper` does not carry over views and triggers. Install the clients and make sure they
+      # are in place.
+      - name: "the mysql/mysqldump clients must be present on the runner"
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mysql-client
+          command -v mysql
+          command -v mysqldump
+          # The versions are printed on purpose: under the names mysql/mysqldump the runner may
+          # carry either the Oracle or the MariaDB client, and their behaviour differs (see
+          # FR-ISO-5b in docs/SPEC.md). Not knowing the vendor has already cost this project a
+          # false diagnosis while investigating a CI failure, and it is cured by one line in the
+          # log.
+          mysql --version
+          mysqldump --version
+        working-directory: ${{ github.workspace }}
+      # The `--health-cmd` of the service above runs INSIDE the DBMS container and only says the
+      # server is alive: `mysqladmin ping` is documented to return 0 on `Access denied` too. Here a
+      # real query is run from the runner with the very credentials the package will use later — the
+      # step is red both when the DBMS did not come up and when the credentials diverged from what
+      # the image entrypoint received. Carried over from the package's own job
+      # (.github/workflows/tests.yml), not invented anew.
+      - name: "wait for the DBMS and verify the credentials"
+        run: |
+          for _ in $(seq 1 60); do
+            if mysql --protocol=TCP -h 127.0.0.1 -P 3306 -u root -p"$MODX_TESTBENCH_DB_PASS" \
+                     --batch --skip-column-names -e 'SELECT 1' >/dev/null 2>&1; then
+              echo "The DBMS responds, the credentials were accepted"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "In 120 seconds the DBMS never executed SELECT 1 as user root." >&2
+          mysql --protocol=TCP -h 127.0.0.1 -P 3306 -u root -p"$MODX_TESTBENCH_DB_PASS" \
+                --batch --skip-column-names -e 'SELECT 1' || true
+          exit 1
+        working-directory: ${{ github.workspace }}
+      - uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.modx-cache
+          # The key carries the job name: two different workflows caching the same path under one
+          # key race for the right to save it first.
+          key: modx-core-testbench-${{ matrix.modx }}
+      - run: composer install --no-interaction --no-progress
+      - run: vendor/bin/modx-testbench install
+      # `composer test`, not a bare `vendor/bin/phpunit` — the latter would run both
+      # suites in ONE process, and that is exactly the path on which this project kept getting the
+      # fatal `Cannot redeclare class ComposerAutoloaderInit…` (two different core distributions in
+      # one PHP process). `composer test` = `test:unit` + `test:integration`, two processes.
+      #
+      # The consumer must define these scripts in their own composer.json — the package DX guide
+      # offers them ready to use.
+      - run: composer test

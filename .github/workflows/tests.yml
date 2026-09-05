@@ -1,0 +1,636 @@
+name: tests
+
+# Without a branch filter every branch ran the full matrix, and the same matrix repeated in
+# `pull_request` — a double run on every push to a branch with an open PR. Branches are checked
+# through PRs; only the main branch is left in `push`, so that the state of `main` stays visible
+# after a merge as well.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Not a decoration: without this block the jobs get GITHUB_TOKEN with the repository's default
+# scope, which in many repositories is read/write. No step of this workflow writes anything back to
+# the repository — the steps are checkout, setup-php, cache, apt-get, composer, the DBMS clients and
+# bin/modx-testbench.
+permissions:
+  contents: read
+
+jobs:
+  # Invariant from docs/SPEC.md: "level 1 pulls in nothing from level 2 and must work with the
+  # database switched off. This is an invariant checked in CI by a separate job." Hence neither a
+  # `services:` block nor a single MODX_TESTBENCH_DB_* variable: this runner has no DBMS at all, and
+  # any dependency of level 1 on the database fails this job instead of slipping through unnoticed.
+  #
+  # The distribution cache is still needed: the level 1 stub needs the real
+  # `MODX\Revolution\modX`/`xPDO\xPDO` classes (docs/SPEC.md: "only the core files are needed"),
+  # and `bootstrap.php` lays them out — by downloading and unpacking, without any database.
+  unit:
+    name: "unit (PHP ${{ matrix.php }}, no database)"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.2', '8.3', '8.4']
+    env:
+      MODX_TESTBENCH_CACHE_DIR: ${{ github.workspace }}/.modx-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: zip, pdo_mysql
+          coverage: none
+      # The version is no longer hardcoded. The unit job deliberately does NOT set
+      # MODX_TESTBENCH_VERSION — it must run exactly the default a consumer will see — and therefore
+      # the cache key must follow the constant rather than a copy of its value in YAML. The file is
+      # required directly: `composer install` comes below, there is no autoloader yet at this step,
+      # and a standalone class needs no constant.
+      - name: "the default MODX version comes from TestbenchConfig::DEFAULT_VERSION"
+        id: default-version
+        run: |
+          version=$(php -r 'require "src/Environment/TestbenchConfig.php"; echo \ModxKit\Testbench\Environment\TestbenchConfig::DEFAULT_VERSION;')
+          test -n "$version"
+          echo "Package default: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.modx-cache
+          # The key is split per job: one and the same key across several jobs means a race for the
+          # right to save the cache — the first one to finish saves it, the rest get
+          # "cache already exists" and silently leave without saving.
+          key: modx-core-unit-${{ steps.default-version.outputs.version }}
+      - run: composer install --no-interaction --no-progress
+      # `composer test:unit`, not a bare `vendor/bin/phpunit --testsuite unit` — the
+      # run goes through exactly the same script as locally, so that CI and the working machine
+      # cannot diverge in their arguments.
+      - run: composer test:unit
+
+  quality:
+    name: "static analysis and code style"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: zip, pdo_mysql
+          coverage: none
+      - run: composer install --no-interaction --no-progress
+      - run: composer cs:check
+      # `--clear-cache` lives in the composer.json script itself, not on this line.
+      # Rector caches results by mtime, and on a fresh checkout without clearing the cache the job
+      # has already produced a false green; fixing that here would leave the local run and CI as
+      # different commands.
+      - run: composer rector:check
+      - run: composer phpstan
+
+  integration:
+    name: "integration (PHP ${{ matrix.php }}, MODX ${{ matrix.modx }}, ${{ matrix.db }}${{ matrix.dbpass != 'testbench' && ', password with a quote and a backslash' || '' }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # The matrix is deliberately narrow. Nobody has checked the compatibility of the
+      # early 3.x lines with modern PHP, and a matrix red through no fault of the package would have
+      # made CI a useless signal from day one. The declared floor is MODX 3.1.2-pl, checked by the
+      # `integration-min-modx` job below. The 3.0.x line is declared UNSUPPORTED (user decision),
+      # and its entry has been removed from that job's matrix.
+      #
+      # Both `include` entries set ALL keys of the base matrix and match none of the existing
+      # combinations (`db: mariadb` — a different DBMS, `dbpass` — a different password), so GitHub
+      # adds them as new combinations instead of merging them into existing ones.
+      matrix:
+        php: ['8.2', '8.3', '8.4']
+        modx: ['3.2.3-pl']
+        db: ['mysql']
+        dbpass: ['testbench']
+        dbrootpass: ['testbench']
+        include:
+          - php: '8.3'
+            modx: '3.2.3-pl'
+            db: 'mariadb'
+            dbpass: 'testbench'
+            dbrootpass: 'testbench'
+          # A password with `"` and `\` drives `MysqlDumper::quoteOption()`
+          # (src/Database/MysqlDumper.php) against a REAL mysql client — an escaping branch that
+          # nothing else in this workflow exercises, because a developer machine without the
+          # clients makes `pickDumper()` silently take `PhpDumper`.
+          #
+          # `dbpass` and `dbrootpass` describe ONE AND THE SAME password and MUST differ by
+          # exactly the doubling of the backslash. This is neither a typo nor a
+          # desynchronisation: the entrypoint of the official image substitutes `MYSQL_ROOT_PASSWORD`
+          # into an SQL literal WITHOUT escaping — `CREATE USER 'root'@'…' IDENTIFIED BY
+          # '${MYSQL_ROOT_PASSWORD}'` (/usr/local/bin/docker-entrypoint.sh, mysql:8.0). Under the
+          # default `sql_mode` (that is, without `NO_BACKSLASH_ESCAPES`) `\b` in the literal collapses
+          # into byte 0x08, and the server creates root with the 10-byte password
+          # `t"est<0x08>ench` instead of the 11-byte `t"est\bench`. Reproduced on a live mysql:8.0:
+          # PDO with the 11-byte value got `Access denied`, with the 10-byte value it connected.
+          #
+          # `dbpass` (11 bytes) goes into MODX_TESTBENCH_DB_PASS, that is, what the package itself
+          # sees; `dbrootpass` (12 bytes, backslash doubled) goes into the image env so that AFTER
+          # the collapse the server receives exactly `dbpass`. A divergence between them is caught by
+          # the "wait for the DBMS" step below: it logs in with the real `MODX_TESTBENCH_DB_PASS` and
+          # turns red if the passwords have drifted apart.
+          - php: '8.2'
+            modx: '3.2.3-pl'
+            db: 'mysql'
+            dbpass: 't"est\bench'
+            dbrootpass: 't"est\\bench'
+    services:
+      db:
+        image: ${{ matrix.db == 'mariadb' && 'mariadb:10.11' || 'mysql:8.0' }}
+        env:
+          # See the long comment about the two password keys in the matrix above:
+          # `dbrootpass` (backslash doubled) MUST stand here, not `dbpass`.
+          MYSQL_ROOT_PASSWORD: ${{ matrix.dbrootpass }}
+          MARIADB_ROOT_PASSWORD: ${{ matrix.dbrootpass }}
+          MYSQL_DATABASE: modx_testbench
+          MARIADB_DATABASE: modx_testbench
+        ports:
+          - 3306:3306
+        # There is deliberately NO `--health-cmd` here: docker parses the `options:` string with a
+        # shell, and one matrix run uses a password containing `"` and `\`. Readiness of the DBMS is
+        # checked by a separate step below, where the password comes from an environment variable and
+        # is never handed to the shell for parsing.
+    env:
+      MODX_TESTBENCH_VERSION: ${{ matrix.modx }}
+      MODX_TESTBENCH_DB_HOST: 127.0.0.1
+      MODX_TESTBENCH_DB_PORT: '3306'
+      MODX_TESTBENCH_DB_USER: root
+      MODX_TESTBENCH_DB_PASS: ${{ matrix.dbpass }}
+      MODX_TESTBENCH_CACHE_DIR: ${{ github.workspace }}/.modx-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: zip, pdo_mysql
+          coverage: none
+      # The mysql/mysqldump clients are not decoration:
+      # `SnapshotManager::pickDumper()` (src/Database/SnapshotManager.php) SILENTLY falls back to
+      # `PhpDumper` when they are missing, and the job would be green with the `MysqlDumper` branch
+      # never executed. So the clients are installed explicitly and their presence is checked
+      # explicitly: `command -v` fails the step if they are still absent after the installation.
+      - name: "the mysql/mysqldump clients must be present on the runner"
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mysql-client
+          command -v mysql
+          command -v mysqldump
+          mysql --version
+          mysqldump --version
+          # The list is exhaustive: exactly these two binaries are used ON THE RUNNER — `mysql` by
+          # the readiness step below and by `MysqlDumper::load()`, `mysqldump` by
+          # `MysqlDumper::dump()`. `mysqladmin` is no longer needed anywhere: its remaining calls
+          # live in the `--health-cmd` of the services, and those run INSIDE the DBMS container,
+          # where the client ships with the image itself.
+      # NOT `mysqladmin ping`. It is documented to return 0 on `Access denied` too — the server is
+      # alive, the connection is refused — that is, it would pass on exactly the defect it is
+      # supposed to catch. Here a real query is run with the very credentials the package will use
+      # later: the step is red both when the DBMS did not come up and when `dbpass`/`dbrootpass`
+      # have drifted apart.
+      - name: "wait for the DBMS and verify the credentials"
+        run: |
+          for _ in $(seq 1 60); do
+            if mysql --protocol=TCP -h 127.0.0.1 -P 3306 -u root -p"$MODX_TESTBENCH_DB_PASS" \
+                     --batch --skip-column-names -e 'SELECT 1' >/dev/null 2>&1; then
+              echo "The DBMS responds, the credentials were accepted"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "In 120 seconds the DBMS never executed SELECT 1 as user root." >&2
+          echo "Either the server did not come up, or MODX_TESTBENCH_DB_PASS does not match the" >&2
+          echo "password the image entrypoint received (see dbpass/dbrootpass in the matrix)." >&2
+          # Both hypotheses above are named, but what the client actually answered was never
+          # printed before this line: the output was silenced on ALL attempts, including the last
+          # one. Silencing inside the loop is mandatory (otherwise sixty identical
+          # "Connection refused"), but here the loop is already over, and the client's answer is the
+          # only thing that tells one hypothesis from the other. `|| true` so that the meaningful
+          # `exit 1` below is not replaced by the client's exit code.
+          echo "The client answer on the last attempt:" >&2
+          mysql --protocol=TCP -h 127.0.0.1 -P 3306 -u root -p"$MODX_TESTBENCH_DB_PASS" \
+                --batch --skip-column-names -e 'SELECT 1' || true
+          exit 1
+      - uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.modx-cache
+          # The key is split per job — see the explanation in the unit job.
+          key: modx-core-integration-${{ matrix.modx }}
+      - run: composer install --no-interaction --no-progress
+      - run: bin/modx-testbench install
+      # `composer test:integration`, not a bare `vendor/bin/phpunit` — the latter would
+      # run BOTH suites in one process, and that is exactly the path on which this project kept
+      # getting the fatal `Cannot redeclare class ComposerAutoloaderInit…`.
+      #
+      # `test:integration:with-clients`, not just `test:integration` — this job installs the real
+      # mysql/mysqldump clients in the step above and connects as root, that
+      # is, it satisfies the conditions of the `mysql-client-tools` and `mysql-user-table` groups
+      # (the full explanation, including the fragility of the exclude-group construct itself, is in
+      # the comment in `phpunit.xml`), while by default `phpunit.xml` excludes them on a par with
+      # `mariadb-client`. Without this substitution SnapshotFormatTest and FixtureDatabaseUserTest
+      # would stop running here as well — not only locally without clients: a silent loss of
+      # coverage, not a fix for `failOnSkipped`. docker for `mariadb-client` is still not brought up
+      # in this job, so that group stays excluded. It is run by the `mariadb-client-group` job at the
+      # end of this file — a job of its own, for reasons measured there.
+      - run: composer test:integration:with-clients
+
+  # The job of the declared support FLOOR: the earliest MODX version the package promises.
+  # A single PHP (8.2, the minimum supported) — that version does not promise more anyway.
+  #
+  # `continue-on-error` is KEPT, and that is not sloppiness: three versions of the 3.1 line have
+  # already been withdrawn from distribution (`3.1.3-pl`, `3.1.4-pl`, `3.1.5-pl` — 404/403, measured
+  # 2026-09-01, see the matrix below). A floor that has become undownloadable would paint the build
+  # red for a reason lying outside the package — exactly the red the deliberately narrow matrix
+  # above exists to avoid. The job stays a signal, not a gate; its failure is investigated, not
+  # ignored.
+  integration-min-modx:
+    name: "integration (minimum supported MODX ${{ matrix.modx }}, PHP 8.2)"
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        # It used to be `3.1.4-pl`, and the job failed not on compatibility but on "Failed to
+        # fetch the distribution": 404. The fork "the version was withdrawn from distribution" versus
+        # "the provider builds a wrong URL" was resolved by querying the distribution itself
+        # (2026-09-01, both links from `ZipReleaseProvider::releaseUrls()`):
+        #   3.1.0-pl, 3.1.1-pl, 3.1.2-pl — modx.com 206, s3 206;
+        #   3.1.3-pl, 3.1.4-pl, 3.1.5-pl — modx.com 404, s3 403.
+        # Three versions of the same line download through the same URL builder, so there is no
+        # defect in the provider: 3.1.4-pl was withdrawn. We take the freshest available in 3.1.
+        #
+        # `3.0.5-pl` is removed: the 3.0.x line is declared unsupported. The cause is measured
+        # and is not fixable in the package: `modX::reloadConfig()` on two adjacent lines
+        # (`modX.php:1429` and `:1431`) brings the core to `include` the same
+        # `core/src/Revolution/modSystemSetting.php` twice — the core autoloader includes the file
+        # with `include`, not `include_once` — and the process dies with `Cannot redeclare class`.
+        # Before the fatal the suite gives `Errors: 5, Failures: 9`: `getOption('core_path')` returns
+        # `null`, and the processors fail on `checkPolicy() on null`. The 3.0.5 core boots only in
+        # part, and all of this lies INSIDE the core, not in the package.
+        modx: ['3.1.2-pl']
+    services:
+      db:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testbench
+          MYSQL_DATABASE: modx_testbench
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -ptestbench"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      MODX_TESTBENCH_VERSION: ${{ matrix.modx }}
+      MODX_TESTBENCH_DB_HOST: 127.0.0.1
+      MODX_TESTBENCH_DB_PORT: '3306'
+      MODX_TESTBENCH_DB_USER: root
+      MODX_TESTBENCH_DB_PASS: testbench
+      MODX_TESTBENCH_CACHE_DIR: ${{ github.workspace }}/.modx-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: zip, pdo_mysql
+          coverage: none
+      - name: "the mysql/mysqldump clients must be present on the runner"
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mysql-client
+          command -v mysql
+          command -v mysqldump
+          # The client vendor must be visible in the log here as well — see the explanation in the
+          # `integration` job above.
+          mysql --version
+          mysqldump --version
+      - uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.modx-cache
+          # The key is split per job — see the explanation in the unit job.
+          key: modx-core-min-modx-${{ matrix.modx }}
+      - run: composer install --no-interaction --no-progress
+      - run: bin/modx-testbench install
+      # See the explanation in the `integration` job above — this job also installs the
+      # mysql/mysqldump clients in an explicit step and connects as root.
+      - run: composer test:integration:with-clients
+
+  # Before this job CI had NOT A SINGLE run with a real MariaDB client. The `db: mariadb`
+  # entry in the `integration` matrix brings up a MariaDB SERVER, but the client there is always the
+  # Oracle one: the install step in every job does `apt-get install mysql-client`, and in the
+  # "mariadb" job the very next line of that step prints `mysql  Ver 8.0.46-0ubuntu0.24.04.4 for
+  # Linux on x86_64 ((Ubuntu))` — Oracle, not MariaDB. Re-check it in the step "the mysql/mysqldump
+  # clients must be present on the runner" of any `integration (…, mariadb)` job; no run id is
+  # quoted on purpose, the public history is restarted at release and the pointer would dangle.
+  # That is, the whole fix for the second pair of client names was made while there was no
+  # regression net for it in CI — only the local `mariadb-client` group, excluded by configuration.
+  #
+  # The job also covers the case where the compatible names are absent altogether. Ubuntu 24.04
+  # installs MariaDB 10.11, which still lays down the compatible names `mysql`/`mysqldump` as
+  # symlinks to `mariadb`/`mariadb-dump`; MariaDB 12.3 no longer lays them down (measured on the
+  # mariadb:latest image). The symlinks are removed here on
+  # purpose — that way the 10.11 runner reproduces the 12.x layout, and the job proves that the
+  # package finds the second pair of names. The client meanwhile stays real, not a stand-in.
+  integration-mariadb-client:
+    name: "integration (MariaDB client without compatible names, PHP 8.3)"
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: mariadb:10.11
+        env:
+          MARIADB_ROOT_PASSWORD: testbench
+          MARIADB_DATABASE: modx_testbench
+        ports:
+          - 3306:3306
+    env:
+      MODX_TESTBENCH_VERSION: '3.2.3-pl'
+      MODX_TESTBENCH_DB_HOST: 127.0.0.1
+      MODX_TESTBENCH_DB_PORT: '3306'
+      MODX_TESTBENCH_DB_USER: root
+      MODX_TESTBENCH_DB_PASS: testbench
+      MODX_TESTBENCH_CACHE_DIR: ${{ github.workspace }}/.modx-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: zip, pdo_mysql
+          coverage: none
+      - name: "the runner must carry the MariaDB client and only under the mariadb* names"
+        run: |
+          sudo apt-get update -qq
+          # The Oracle client is not needed here and would get in the way: the packages conflict
+          # over the same names, and this job exists for the sake of the second pair.
+          sudo apt-get remove -y -qq mysql-client mysql-client-core-8.0 || true
+          sudo apt-get install -y -qq mariadb-client
+          command -v mariadb
+          command -v mariadb-dump
+          # The MariaDB 12 layout: no compatible names at all. We delete ONLY symlinks — if it turns
+          # out to be a real file, the step must fail rather than silently remove the client.
+          for legacy in /usr/bin/mysql /usr/bin/mysqldump; do
+            if [ -e "$legacy" ]; then
+              test -L "$legacy"
+              sudo rm -f "$legacy"
+            fi
+          done
+          ! command -v mysql
+          ! command -v mysqldump
+          # Vendor and version go into the log: it was precisely not knowing the vendor that cost
+          # this project a false diagnosis.
+          mariadb --version
+          mariadb-dump --version
+      - name: "wait for the DBMS and verify the credentials"
+        run: |
+          for _ in $(seq 1 60); do
+            if mariadb --protocol=TCP -h 127.0.0.1 -P 3306 -u root -p"$MODX_TESTBENCH_DB_PASS" \
+                       --batch --skip-column-names -e 'SELECT 1' >/dev/null 2>&1; then
+              echo "The DBMS responds, the credentials were accepted"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "In 120 seconds the DBMS never executed SELECT 1 as user root." >&2
+          echo "The client answer on the last attempt:" >&2
+          mariadb --protocol=TCP -h 127.0.0.1 -P 3306 -u root -p"$MODX_TESTBENCH_DB_PASS" \
+                  --batch --skip-column-names -e 'SELECT 1' || true
+          exit 1
+      - uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.modx-cache
+          key: modx-core-mariadb-client-3.2.3-pl
+      - run: composer install --no-interaction --no-progress
+      # Installation and the strategy check are one step: the snapshot must be captured by the
+      # clients and not by the PHP fallback, and that is exactly what proves the second pair of names
+      # was found. The line is printed by the `install` command itself; `set -o pipefail` so
+      # that its own failure is not lost in the pipeline.
+      - name: "install; the snapshot must be captured by the clients, not the PHP fallback"
+        run: |
+          set -o pipefail
+          bin/modx-testbench install | tee install.log
+          grep -q "Snapshot strategy: mysql" install.log
+          rm -f install.log
+      # Here it is `test:integration`, not `with-clients`: that script ENABLES the
+      # `mysql-client-tools` group, and that group needs clients under the names `mysqldump`/`mysql`
+      # — exactly the ones this job deliberately strips from the runner (`new MysqlDumper()` by
+      # default calls that very pair, `src/Database/MysqlDumper.php:47-51`). Hence the three
+      # `SnapshotFormatTest` failures in the first CI run were substantive, not an oversight. The
+      # `phpunit.xml` exclusions give exactly the set needed here, and they are also the only
+      # portable way to exclude more than one group: the command-line option behaves differently
+      # across the supported PHPUnit versions (see
+      # `ExcludeGroupOptionTest`). `mysql-user-table` is not lost meanwhile: the `integration` jobs
+      # run it.
+      - run: composer test:integration
+
+  # The declared lower bounds `symfony/console: ^6.4`, `symfony/process: ^6.4` and
+  # `phpunit/phpunit` had never been exercised once over the project: both locally and in CI the
+  # freshest versions were installed, and `composer.lock` is not used in CI at all (`composer
+  # install` without a lock in a library installs by the bounds). This job runs the suite on exactly
+  # the minimum allowed set.
+  #
+  # What was already found when it was set up (measured on PHP 8.4.8): `phpunit/phpunit: ^10.5` let
+  # 10.5.0 through, which on PHP 8.4 touches the `E_STRICT` constant, declared deprecated — PHPUnit
+  # treats a non-empty STDERR of the child process as an error, and the unit suite gave
+  # `Tests: 237, Errors: 8, Risky: 3`. Fixed in 10.5.36 (phpunit#5956), so the bound was raised to
+  # the truth: `^10.5.36`.
+  #
+  # The quality tools are removed BEFORE the resolution, and that is not a run-time optimisation.
+  # `php-cs-fixer ^3.94` requires `symfony/console ^6.4.24`, so with it `--prefer-lowest` will
+  # NEVER descend to 6.4.0 — while the package declares `symfony/console: ^6.4`, and a consumer of
+  # the library does not install the package dev dependencies at all. With the tools removed the set
+  # really does descend to the declared floors (measured), and both suites are green on them.
+  # Code style, Rector and PHPStan are not run in this job — the `quality` job is there for them.
+  dependencies-lowest:
+    name: "dependency lower bounds (prefer-lowest, PHP ${{ matrix.php }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The minimum supported PHP and the freshest one: the finding above was visible only on
+        # 8.4, and an incompatibility of the lower bound with 8.2 would be visible only on 8.2.
+        php: ['8.2', '8.4']
+    services:
+      db:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testbench
+          MYSQL_DATABASE: modx_testbench
+        ports:
+          - 3306:3306
+    env:
+      MODX_TESTBENCH_VERSION: '3.2.3-pl'
+      MODX_TESTBENCH_DB_HOST: 127.0.0.1
+      MODX_TESTBENCH_DB_PORT: '3306'
+      MODX_TESTBENCH_DB_USER: root
+      MODX_TESTBENCH_DB_PASS: testbench
+      MODX_TESTBENCH_CACHE_DIR: ${{ github.workspace }}/.modx-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: zip, pdo_mysql
+          coverage: none
+      - name: "the mysql/mysqldump clients must be present on the runner"
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq mysql-client
+          command -v mysql
+          command -v mysqldump
+          mysql --version
+          mysqldump --version
+      - name: "wait for the DBMS and verify the credentials"
+        run: |
+          for _ in $(seq 1 60); do
+            if mysql --protocol=TCP -h 127.0.0.1 -P 3306 -u root -p"$MODX_TESTBENCH_DB_PASS" \
+                     --batch --skip-column-names -e 'SELECT 1' >/dev/null 2>&1; then
+              echo "The DBMS responds, the credentials were accepted"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "In 120 seconds the DBMS never executed SELECT 1 as user root." >&2
+          echo "The client answer on the last attempt:" >&2
+          mysql --protocol=TCP -h 127.0.0.1 -P 3306 -u root -p"$MODX_TESTBENCH_DB_PASS" \
+                --batch --skip-column-names -e 'SELECT 1' || true
+          exit 1
+      - uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.modx-cache
+          key: modx-core-lowest-3.2.3-pl
+      - name: "the minimum allowed dependency set"
+        run: |
+          # `--no-update`: we edit the manifest only, the resolution happens in the next command,
+          # in one go.
+          composer remove --dev --no-update --no-interaction \
+                  friendsofphp/php-cs-fixer phpstan/phpstan phpstan/phpstan-phpunit rector/rector
+          # No `COMPOSER_NO_SECURITY_BLOCKING=1` here, and that is the point of the floors the
+          # manifest declares. Composer 2.10 by default REFUSES to install a version with a security
+          # advisory against it, so while the floors were `symfony/process ^6.4` and
+          # `phpunit/phpunit ^10.5.36` this job could only reach them by switching that refusal off
+          # — and then it checked a set Composer would never hand a consumer. Measured on the old
+          # manifest (2026-09-02): under 2.10.3 the resolution gave `symfony/process v6.4.33` and
+          # `phpunit/phpunit 10.5.62`, under 2.8.9 — `v6.4.0` and `10.5.36`; the cache had nothing
+          # to do with it (both runs with an empty COMPOSER_HOME), and `COMPOSER_NO_AUDIT` does NOT
+          # disable the refusal — it only removes the report after the resolution. The floors were
+          # raised to exactly the two versions 2.10 was descending to anyway, so the declared bound
+          # and the bound a consumer can actually reach are now the same one, and this job checks it
+          # with nothing switched off.
+          composer update --prefer-lowest --prefer-stable --no-interaction --no-progress
+          # Versions go into the log: without them a failure on the lower bound cannot be told
+          # apart from a failure of the code.
+          composer show --direct
+          # The job's own guard: if a dependency turns out to be above the declared bound, then
+          # something is pulling it up again and the job is checking something other than what it
+          # promises. The literals must match the floor of the bounds from composer.json — that is
+          # closed by `ModxKit\Testbench\Tests\Unit\DependencyFloorGuardTest`, because a silent
+          # divergence between the manifest and the job is otherwise invisible.
+          composer show symfony/console | grep -E '^versions.*\*? v?6\.4\.0'
+          composer show symfony/process | grep -E '^versions.*\*? v?6\.4\.33'
+          composer show phpunit/phpunit | grep -E '^versions.*\*? v?10\.5\.62'
+      - run: bin/modx-testbench install
+      - run: composer test
+
+  # The `mariadb-client` group, which `phpunit.xml` excludes from every suite and which therefore
+  # ran in NO pipeline at all — neither in CI nor locally under `composer qa` — while guarding a
+  # regression this project has already been bitten by once (the second pair of client names,
+  # `mariadb`/`mariadb-dump`). Three tests, 58 assertions.
+  #
+  # It needs THREE things at once, and no job above gives all three. Each of the three was measured
+  # by a red run, not deduced:
+  #
+  #   1. docker — the group takes REAL MariaDB clients out of `mariadb:10.11` and `mariadb:latest`
+  #      by `docker run --network host` and substitutes only PATH. Every ubuntu-latest runner has it.
+  #   2. a runner WITHOUT `mysql`/`mysqldump` in PATH. `MysqlDumper` calls that pair first, so while
+  #      the Oracle client every other job installs is in place, the group's own clients are never
+  #      reached: the dump comes back with the header `MySQL dump 10.13  Distrib 8.0.46` and the
+  #      assertion "made by a MariaDB client" fails. That is why the pair is deleted below, and why
+  #      no `apt-get install mysql-client` step exists in this job at all.
+  #   3. a MySQL server. Against `mariadb:10.11` two of the three tests fail for reasons belonging to
+  #      the server rather than to the package: the MariaDB 12 client refuses a plaintext connection
+  #      (`TLS/SSL error: SSL is required, but the server does not support it`), and MariaDB's
+  #      default `lock_wait_timeout` is 86400 where the test's own premise asserts the MySQL default
+  #      31536000.
+  #
+  # `integration-mariadb-client` gives 1 and 2 but a MariaDB server; `integration` gives 1 and 3 but
+  # keeps the Oracle clients. Hence a job of its own.
+  #
+  # `--group` REPLACES the exclusion list of `phpunit.xml` rather than adding to it, so the three
+  # tests of the group are exactly what runs here — read that off the test count in the step's own
+  # log, not off this comment. `--list-tests` is not a usable oracle for it: on PHPUnit 10.5.36 it
+  # ignores the exclusions entirely (see `ExcludeGroupOptionTest`).
+  mariadb-client-group:
+    name: "the mariadb-client group (no mysql/mysqldump on the runner, MySQL server)"
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testbench
+          MYSQL_DATABASE: modx_testbench
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -ptestbench"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      MODX_TESTBENCH_VERSION: '3.2.3-pl'
+      MODX_TESTBENCH_DB_HOST: 127.0.0.1
+      MODX_TESTBENCH_DB_PORT: '3306'
+      MODX_TESTBENCH_DB_USER: root
+      MODX_TESTBENCH_DB_PASS: testbench
+      MODX_TESTBENCH_CACHE_DIR: ${{ github.workspace }}/.modx-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: zip, pdo_mysql
+          coverage: none
+      - name: "the runner must NOT carry mysql/mysqldump"
+        run: |
+          # ubuntu-latest ships the Oracle client pre-installed; this job exists for the layout
+          # where it is absent, so it is removed rather than left and hoped about.
+          sudo apt-get remove -y -qq mysql-client mysql-client-core-8.0 || true
+          for legacy in /usr/bin/mysql /usr/bin/mysqldump; do
+            sudo rm -f "$legacy"
+          done
+          # The premise of the whole job. Without these two lines a runner that still had the pair
+          # would send the group down the Oracle branch and the run would go green having proved
+          # the opposite of what it promises.
+          ! command -v mysql
+          ! command -v mysqldump
+      # No `mysql` client left on the runner, so readiness is checked through PDO — a real
+      # connection with the very credentials the package will use, not a ping that returns 0 on
+      # `Access denied` as well.
+      - name: "wait for the DBMS and verify the credentials"
+        run: |
+          php -r '
+            $last = "no attempt was made";
+            for ($i = 0; $i < 60; $i++) {
+                try {
+                    new PDO("mysql:host=127.0.0.1;port=3306", "root", (string) getenv("MODX_TESTBENCH_DB_PASS"));
+                    echo "The DBMS responds, the credentials were accepted\n";
+                    exit(0);
+                } catch (PDOException $e) {
+                    $last = $e->getMessage();
+                    sleep(2);
+                }
+            }
+            fwrite(STDERR, "In 120 seconds the DBMS never accepted a PDO connection as root.\n");
+            fwrite(STDERR, "The answer on the last attempt: " . $last . "\n");
+            exit(1);'
+      - uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.modx-cache
+          # The key is split per job — see the explanation in the unit job.
+          key: modx-core-mariadb-client-group-3.2.3-pl
+      - run: composer install --no-interaction --no-progress
+      # With no clients on the runner the environment is installed with the `php` snapshot strategy,
+      # and that is exactly the local configuration in which this group is green: the group brings
+      # its own clients and substitutes PATH only inside its own tests.
+      - run: bin/modx-testbench install
+      - run: vendor/bin/phpunit --testsuite integration --group mariadb-client

@@ -1,0 +1,30 @@
+# Distribution boundary: what a consumer gets under vendor/.
+#
+# Allowlist, not blocklist, and deliberately so: with a blocklist every new top-level
+# file ships silently until someone remembers to exclude it.
+#
+# Both lines per directory are required. Measured, not assumed: `export-ignore` on a
+# directory prunes the whole subtree, so unsetting only `/src/**` yields an archive
+# without src/ at all, and unsetting only `/src` yields an empty src/ directory.
+#
+# Verify with the build, never by reading this file:
+#     git archive HEAD | tar t
+
+* export-ignore
+
+/src            -export-ignore
+/src/**         -export-ignore
+/stubs          -export-ignore
+/stubs/**       -export-ignore
+/bin            -export-ignore
+/bin/**         -export-ignore
+# ci/ is opened by the single file the documentation tells a consumer to run
+# (docs/DX_GUIDE.md, "Local DBMS"), not by `/ci/**`: naming the file keeps the allowlist
+# property — a future ci/ file does not ship until it is listed here on purpose.
+/ci             -export-ignore
+/ci/docker-compose.yml -export-ignore
+/bootstrap.php  -export-ignore
+/composer.json  -export-ignore
+/LICENSE        -export-ignore
+/README.md      -export-ignore
+/README.ru.md   -export-ignore

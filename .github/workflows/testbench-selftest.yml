@@ -1,0 +1,42 @@
+name: reusable workflow selftest
+
+# `.github/workflows/testbench.yml` is the one artefact this package hands to OTHER repositories:
+# a consumer copies a single `uses:` line and gets the whole pipeline. Until this workflow existed
+# that file had never been executed by anything — `gh run list --workflow testbench.yml` was empty
+# while the repository had 27 runs, all of them of `tests.yml`. A shipped recipe nobody has ever
+# run is exactly the class of defect this project refuses to ship.
+#
+# So it is called here the way a consumer calls it, only by a local path instead of
+# `owner/repo/.github/workflows/testbench.yml@ref`: same file, same steps, same inputs. What a
+# local call does NOT prove is that the ADDRESS in the README resolves — that is a separate
+# question, and it is settled at release together with the choice of owner.
+#
+# The consumer it runs against is `ci/consumer/`: a real, minimal extra with its own composer.json,
+# its own phpunit.xml copied from the DX guide, and one test per level. It has to be a separate
+# package rather than this repository itself, and that is measured, not assumed: Composer does not
+# link the ROOT package's binaries into its own `vendor/bin`, so `vendor/bin/modx-testbench install`
+# — step of the reusable workflow — cannot work in a self-call from the package's own directory.
+# `ci/consumer/` requires the package through a `path` repository, and there the binary is linked
+# like it is for anybody else.
+#
+# `ci/consumer/` does not reach a consumer: `.gitattributes` is an allowlist, and only
+# `ci/docker-compose.yml` is named in it. Check with the build, not by reading:
+# `git archive HEAD | tar t`.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  reusable-workflow:
+    # One combination, not the default matrix of three: this job answers "does the shipped workflow
+    # run at all", and the PHP/MODX matrix is already covered by tests.yml on the package itself.
+    uses: ./.github/workflows/testbench.yml
+    with:
+      php-versions: '["8.3"]'
+      modx-versions: '["3.2.3-pl"]'
+      working-directory: ci/consumer

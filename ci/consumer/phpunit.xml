@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Copied from the recipe in docs/DX_GUIDE.md, section 2, deliberately verbatim: if the recipe and
+    this file drift apart, the run stops proving anything about the recipe.
+-->
+<phpunit bootstrap="vendor/modxkit/testbench/bootstrap.php"
+         cacheDirectory=".phpunit.cache"
+         beStrictAboutOutputDuringTests="true">
+    <testsuites>
+        <testsuite name="unit">
+            <directory>tests/Unit</directory>
+        </testsuite>
+        <testsuite name="integration">
+            <directory>tests/Integration</directory>
+        </testsuite>
+    </testsuites>
+    <extensions>
+        <bootstrap class="ModxKit\Testbench\PHPUnit\ExposureWarningExtension"/>
+    </extensions>
+</phpunit>

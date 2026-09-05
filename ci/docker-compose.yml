@@ -1,0 +1,52 @@
+# Local DBMS for the integration suite (level 2). Level 1 does not need it at all — see
+# docs/SPEC.md: "level 1 ... must work with the database switched off".
+#
+# Running against MySQL (the default port is 3306, the variable may be left unset):
+#   docker compose -f ci/docker-compose.yml up -d
+#   MODX_TESTBENCH_DB_HOST=127.0.0.1 MODX_TESTBENCH_DB_USER=root \
+#   MODX_TESTBENCH_DB_PASS=testbench composer test
+#
+# Running against MariaDB — same directory, same composer, different port:
+#   MODX_TESTBENCH_DB_HOST=127.0.0.1 MODX_TESTBENCH_DB_PORT=3307 MODX_TESTBENCH_DB_USER=root \
+#   MODX_TESTBENCH_DB_PASS=testbench composer test
+#
+# The second example is not decorative: the port is part of the configuration fingerprint, so the
+# environments of the two DBMSes do not overlap, and the "non-empty MODX_TESTBENCH_DB_PORT" path
+# itself goes through `database_server` with `:port` in setup/config.xml — the very branch that
+# mutation M9 was closed for.
+#
+# MariaDB deliberately listens on 3307 from the outside: both DBMSes must be able to run at the
+# same time so that one and the same working directory can be checked against both without
+# shutting the first one down. Inside the container both use the regular port 3306.
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: testbench
+      MYSQL_DATABASE: modx_testbench
+    ports:
+      - "3306:3306"
+    # The option is alive only up to MySQL 8.4: measured — `mysql:8` (8.4.11) rejects it
+    # (`unknown variable 'default-authentication-plugin=mysql_native_password'`) and fails while
+    # initialising the data directory, whereas the `mysql:8.0` (8.0.46) pinned here accepts it.
+    # This file does not order an image change; the line stays together with the image that
+    # understands it.
+    command: --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-ptestbench"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mariadb:
+    image: mariadb:10.11
+    environment:
+      MARIADB_ROOT_PASSWORD: testbench
+      MARIADB_DATABASE: modx_testbench
+    ports:
+      - "3307:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20

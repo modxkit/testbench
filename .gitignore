@@ -1,0 +1,17 @@
+.idea
+.dev/
+/CLAUDE.md
+/HANDOFF.md
+.claude/
+.worktrees/
+.superpowers/
+.playwright-mcp/
+.php-cs-fixer.cache
+.phpunit.cache
+.phpunit.result.cache
+dist
+graphify-out
+vendor
+node_modules
+composer.lock
+/.ignore

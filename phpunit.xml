@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/10.5/phpunit.xsd"
+         bootstrap="bootstrap.php"
+         cacheDirectory=".phpunit.cache"
+         beStrictAboutOutputDuringTests="true"
+         failOnRisky="true"
+         failOnWarning="true"
+         failOnSkipped="true">
+    <testsuites>
+        <testsuite name="unit">
+            <directory>tests/Unit</directory>
+        </testsuite>
+        <testsuite name="integration">
+            <directory>tests/Integration</directory>
+        </testsuite>
+    </testsuites>
+    <!--
+        Three groups are excluded from both suites by default: their tests depend on an external
+        tool or on a privilege that is not present on every machine. Such a dependency is
+        expressed as a group excluded by configuration rather than as a conditional
+        markTestSkipped(): under failOnSkipped (below) a skip is indistinguishable from a green
+        run that verified nothing.
+
+        mariadb-client — the tests start a container with real MariaDB clients
+        (docker run mariadb:10.11); docker is not available everywhere. It is run by requesting
+        the group explicitly: vendor/bin/phpunit with the testsuite (integration) and group
+        (mariadb-client) options.
+
+        mysql-client-tools (SnapshotFormatTest) and mysql-user-table (FixtureDatabaseUserTest) —
+        these need real mysql/mysqldump clients in PATH and, respectively, the SELECT privilege on
+        mysql.user. Unlike mariadb-client, CI provides both through the job's regular steps rather
+        than through separate preparation for these groups: the clients are installed by the step
+        "the mysql/mysqldump clients must be present on the runner"
+        (.github/workflows/tests.yml), and the account is root. That is why the integration and
+        integration-min-modx jobs run composer test:integration:with-clients rather than
+        composer test:integration — the same suite, but with the exclude group option set to
+        mariadb-client instead of the exclusion list from this file (docker is still not up in CI,
+        so mariadb-client is the one that stays outside).
+
+        The exception is the integration-mariadb-client job: it deliberately leaves the runner the
+        clients ONLY under the names mariadb/mariadb-dump, while the mysql-client-tools group
+        requires the pair mysqldump/mysql (the names MysqlDumper calls by default). That job
+        therefore runs the plain composer test:integration — with the exclusion list FROM THIS
+        file. The same set cannot be expressed portably on the command line: on PHPUnit 10.5.36 a
+        repeated exclude group option keeps only the last group, and on 12.5.33 a comma-separated
+        list is not parsed (measured, see ExcludeGroupOptionTest).
+
+        The fragile part of this arrangement: exclude group REPLACES the XML exclusion list
+        wholesale instead of adding to it. So if one MORE group is added to <groups><exclude> in
+        the future (say, for another tool missing from CI), test:integration:with-clients will
+        silently start including it too — both places will have to be updated together, not just
+        this file.
+
+        Options are written here without dashes throughout: XML forbids a double dash inside a
+        comment.
+    -->
+    <groups>
+        <exclude>
+            <group>mariadb-client</group>
+            <group>mysql-client-tools</group>
+            <group>mysql-user-table</group>
+        </exclude>
+    </groups>
+    <source>
+        <include>
+            <directory>src</directory>
+        </include>
+    </source>
+</phpunit>
