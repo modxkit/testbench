@@ -1,5 +1,9 @@
 # ModxKit Testbench
 
+[![tests](https://github.com/modxkit/testbench/actions/workflows/tests.yml/badge.svg)](https://github.com/modxkit/testbench/actions/workflows/tests.yml)
+[![PHP](https://img.shields.io/badge/PHP-8.2%20%7C%208.3%20%7C%208.4-777bb4)](composer.json)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 > Russian version: [README.ru.md](README.ru.md) — a translation, it may lag behind this document.
 
 An automated test environment for MODX Revolution 3 extras — what `orchestra/testbench` is for Laravel.
