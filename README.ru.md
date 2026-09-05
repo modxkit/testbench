@@ -1,6 +1,7 @@
 # ModxKit Testbench
 
 [![tests](https://github.com/modxkit/testbench/actions/workflows/tests.yml/badge.svg)](https://github.com/modxkit/testbench/actions/workflows/tests.yml)
+[![Packagist](https://img.shields.io/packagist/v/modxkit/testbench)](https://packagist.org/packages/modxkit/testbench)
 [![PHP](https://img.shields.io/badge/PHP-8.2%20%7C%208.3%20%7C%208.4-777bb4)](composer.json)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
