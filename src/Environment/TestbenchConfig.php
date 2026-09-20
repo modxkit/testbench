@@ -25,6 +25,12 @@ final readonly class TestbenchConfig
         public string $cacheDir,
         public ?string $workspaceDir,
         public bool $forceInstall,
+        /**
+         * The guard against two runs over one environment is OFF. Defaulted rather than required:
+         * the class is part of the public surface, and a new mandatory parameter would break every
+         * consumer who builds a configuration by hand.
+         */
+        public bool $allowConcurrent = false,
     ) {
     }
 
@@ -40,6 +46,7 @@ final readonly class TestbenchConfig
             cacheDir: Env::get('MODX_TESTBENCH_CACHE_DIR') ?? self::defaultCacheDir(),
             workspaceDir: Env::get('MODX_TESTBENCH_WORKSPACE'),
             forceInstall: Env::bool('MODX_TESTBENCH_FORCE_INSTALL'),
+            allowConcurrent: Env::bool('MODX_TESTBENCH_ALLOW_CONCURRENT'),
         );
     }
 

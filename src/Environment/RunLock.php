@@ -1,0 +1,223 @@
+<?php
+
+declare(strict_types=1);
+
+namespace ModxKit\Testbench\Environment;
+
+use ModxKit\Testbench\Exception\ConcurrentRunException;
+use ModxKit\Testbench\Support\Env;
+
+/**
+ * The exclusive hold on one test environment for the lifetime of the run (FR-ENV-9).
+ *
+ * **`flock()` rather than a pid written down and compared.** Liveness is then the operating
+ * system's answer, not ours: the lock goes away with the holder whatever killed it — `kill -9`, a
+ * PHP fatal, a closed terminal — and there is no stale record to reason about. A pid compared by
+ * hand has to answer "is it still alive", and pids are reissued; the hole is already written down
+ * in `tests/Support/RunScopedDatabaseName.php`, where the package's own suite works around it. The
+ * pid is written into the file all the same, but only to give the refusal something to name.
+ *
+ * **Beside the environment directory, never inside it.** A reinstallation deletes the environment
+ * directory in full ({@see TestbenchKernel::prepare()} calls {@see Workspace::destroy()}), and a
+ * file unlinked under a descriptor that holds it stops being shared: the next process creates a new
+ * inode at the same path and both "hold" a lock of their own. So the file lives in `locks/`, a
+ * sibling of `workspaces/`, and nothing deletes it.
+ *
+ * **Keyed by the environment fingerprint**, which already carries host, port, database name, user,
+ * password and table prefix. One lock therefore means one environment AND one database, without a
+ * second notion to keep in step. What this does NOT cover: two runs pointed at one
+ * `MODX_TESTBENCH_WORKSPACE` by hand while their databases differ — different fingerprints, two
+ * locks, and a fight over the directory. Covering that as well would take a second lock keyed the
+ * other way, and the configuration is reached only on purpose.
+ *
+ * **Not taken is not a failure.** Where the private cache directory cannot be created the guard
+ * simply does not exist for that run: refusing to test because a protective measure is unavailable
+ * would break runs that work today. That is the same ruling FR-ENV-8 already makes about the 0700
+ * it cannot always set.
+ *
+ * **A child of the holder is not a second run.** The package spawns such children itself — the
+ * build script of a transport package ({@see \ModxKit\Testbench\Package\TransportInstaller}) boots
+ * the very same environment in a subprocess, and so does the deprecation probe of the suite —
+ * and refusing them would break a documented feature instead of preventing a collision. Measured,
+ * not foreseen: the first build of this guard turned three of the package's own tests red, one of
+ * them the transport package the DX guide sells.
+ *
+ * They are told apart by a TOKEN, not by a pid or by ancestry: pids are reissued and `getppid()`
+ * chains are not portable. The holder writes a random token into the first line of the lock file
+ * and publishes the same token with `putenv()`, from where every subprocess inherits it along with
+ * the rest of the environment. Whoever comes with a matching token belongs to the run that holds
+ * the lock; a stranger has no way to know it. A token inherited from somewhere else while the lock
+ * is FREE changes nothing — the lock is simply taken, and a fresh token replaces the stale one.
+ *
+ * The hold ends in one of three ways, and all three are the same event: {@see self::release()} called
+ * by hand, the holder being dropped (its destructor calls `release()` — which is what
+ * {@see TestbenchKernel::reset()} amounts to), or the process ending, where the operating system
+ * closes the descriptor whether or not any PHP code got to run.
+ *
+ * @internal
+ */
+final class RunLock
+{
+    /**
+     * The mode of `locks/`. The parent `<base>/modx-testbench` is shared with the release cache and
+     * on a machine where the cache created it first it is 0755 — open to listing. The fingerprint
+     * in a file name is exactly what FR-ENV-8 keeps closed, so this segment, created by the package
+     * itself, carries the 0700.
+     */
+    private const DIRECTORY_MODE = 0700;
+
+    /**
+     * The handshake variable. NOT part of the configuration and not for the consumer to set: it is
+     * written by the holder and read by its children, which is why it is absent from the table of
+     * `MODX_TESTBENCH_*` variables in the README and from
+     * {@see TestbenchConfig::fromEnvironment()}.
+     */
+    private const TOKEN_VARIABLE = 'MODX_TESTBENCH_RUN_TOKEN';
+
+    /** @param resource|null $handle the hold itself; closing it releases the lock */
+    private function __construct(private $handle)
+    {
+    }
+
+    /**
+     * Lets the environment go.
+     *
+     * Idempotent, because the destructor calls it as well and a double `fclose()` on the same
+     * resource is a warning for nothing. Deliberately a method and not only a destructor: a test
+     * that has to hand the environment to the next process wants the release to happen at a
+     * point it chose, not whenever the object is collected.
+     */
+    public function release(): void
+    {
+        if ($this->handle === null) {
+            return;
+        }
+
+        // `fclose()` releases the lock by itself — an explicit `flock(LOCK_UN)` would only widen
+        // the window between the two calls in which the environment is free while this run still
+        // believes it holds it.
+        fclose($this->handle);
+
+        $this->handle = null;
+    }
+
+    public function __destruct()
+    {
+        $this->release();
+    }
+
+    public static function pathFor(TestbenchConfig $config): string
+    {
+        return PrivateCacheDirectory::path() . '/locks/' . $config->fingerprint() . '.lock';
+    }
+
+    public static function acquire(TestbenchConfig $config): ?self
+    {
+        if ($config->allowConcurrent) {
+            return null;
+        }
+
+        $path = self::pathFor($config);
+        $directory = dirname($path);
+
+        // The mode goes to `mkdir()` rather than a `chmod()` afterwards: on a recursive creation
+        // every segment gets it, and there is no window in between when the directory is open.
+        if (!is_dir($directory) && !mkdir($directory, self::DIRECTORY_MODE, true) && !is_dir($directory)) {
+            return null;
+        }
+
+        // 'c' and not 'w': 'w' truncates the file on open, and the holder's record would be wiped
+        // by the very process that is about to be refused.
+        $handle = @fopen($path, 'c');
+
+        if ($handle === false) {
+            return null;
+        }
+
+        if (!flock($handle, LOCK_EX | LOCK_NB)) {
+            $held = self::read($path);
+            fclose($handle);
+
+            // Our own child: it inherited the token together with the rest of the environment.
+            // It gets no lock object of its own — the lock is already held by the run it belongs
+            // to, and holding it twice would mean releasing it twice.
+            if ($held['token'] !== '' && $held['token'] === Env::get(self::TOKEN_VARIABLE)) {
+                return null;
+            }
+
+            throw ConcurrentRunException::heldBy($held['record'], $config->database->name, $path);
+        }
+
+        // The token belongs to the RUN, not to this one lock: a run that takes a second environment
+        // keeps the token its children already carry. Minting a fresh one here disowned them —
+        // they went on presenting the old token to the file of the FIRST lock, which now held a
+        // different one, and were refused entry into the environment their own parent was holding.
+        $token = Env::get(self::TOKEN_VARIABLE) ?? bin2hex(random_bytes(8));
+
+        ftruncate($handle, 0);
+        rewind($handle);
+        fwrite($handle, $token . "\n" . self::record($config));
+        fflush($handle);
+
+        self::publish($token);
+
+        return new self($handle);
+    }
+
+    /**
+     * Into all three places, and not one of them is superfluous — measured, not assumed.
+     *
+     * `putenv()` is what a child spawned by `proc_open()`, `exec()` or `passthru()` inherits: those
+     * take the real process environment. Symfony's `Process`, which the package and its suite use,
+     * does NOT: `Process::getDefaultEnv()` takes `getenv()` and intersects it with `$_SERVER`
+     * (`vendor/symfony/process/Process.php:1713`), so a variable that exists only in the real
+     * environment is filtered out on its way to the child. The first build of this handshake
+     * published the token with `putenv()` alone and the test "a child of this run is let through"
+     * went red with `refused`.
+     *
+     * `$_ENV` for symmetry with the pair `Env::get()` reads, so that the value a child sees is the
+     * value this process would read about itself.
+     */
+    private static function publish(string $token): void
+    {
+        putenv(self::TOKEN_VARIABLE . '=' . $token);
+        $_SERVER[self::TOKEN_VARIABLE] = $token;
+        $_ENV[self::TOKEN_VARIABLE] = $token;
+    }
+
+    private static function record(TestbenchConfig $config): string
+    {
+        return sprintf(
+            'pid %d, started %s, database "%s"',
+            getmypid(),
+            date('c'),
+            $config->database->name
+        );
+    }
+
+    /**
+     * The holder writes its record after taking the lock, so a run refused in that very window sees
+     * an empty file. Saying so is better than printing nothing where a pid was promised — and an
+     * empty token matches nobody, so the window cannot let a stranger through either.
+     *
+     * @return array{token: string, record: string}
+     */
+    private static function read(string $path): array
+    {
+        $contents = @file_get_contents($path);
+
+        if (!is_string($contents) || trim($contents) === '') {
+            return [
+                'token' => '',
+                'record' => 'the record has not been written yet (the run has only just started)',
+            ];
+        }
+
+        $lines = explode("\n", $contents, 2);
+
+        return [
+            'token' => trim($lines[0]),
+            'record' => trim($lines[1] ?? ''),
+        ];
+    }
+}

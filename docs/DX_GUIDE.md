@@ -706,11 +706,12 @@ Two limitations of the `local` provider that are easy to trip over:
 ## 8. Diagnostics
 
 All the package's exceptions live in `ModxKit\Testbench\Exception\` and inherit `TestbenchException`.
-The directory holds 13 files: the base `TestbenchException`, 11 of its descendants and the
+The directory holds 14 files: the base `TestbenchException`, 12 of its descendants and the
 `SecretFreeMessage` marker interface. Every descendant is listed below:
 
 | Exception                                     | What to check                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ConcurrentRunException`                      | Another run is already using this environment. Either give this project a database of its own with `MODX_TESTBENCH_DB_NAME` (see "Two projects on one DBMS" below), or, if several processes over one environment are what you meant, set `MODX_TESTBENCH_ALLOW_CONCURRENT=1`. The message names the pid of the holder, when it started and the file it holds |
 | `CoreDownloadFailedException`                 | The value of `MODX_TESTBENCH_VERSION`, network access; if a corrupt archive is suspected, delete the cache directory (the exception text names it and lists the URLs that were tried)                                                                                                                                                                                                                                                                                                                                                      |
 | `CoreTransportUnpackException`                | The integrity of `core.transport.zip`; if the file is suspected of having been replaced — delete `core/packages` and fetch the core again                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `InstallationFailedException`                 | The installer output in the exception text — it lists the environment checks that did not pass; the availability of the DBMS and the user's `CREATE` privilege                                                                                                                                                                                                                                                                                                                                                                             |
@@ -730,6 +731,54 @@ a test) or the base `TestbenchException` (on the bookkeeping connections of the 
 schema inventory). The text names the host, the port, the user and the `MODX_TESTBENCH_DB_*` variables.
 
 The current state of the environment can always be inspected: `vendor/bin/modx-testbench status`.
+
+### Two projects on one DBMS
+
+Two projects that leave `MODX_TESTBENCH_DB_NAME` alone do not merely share a DBMS server — they
+share one **database**, one table prefix `modx_` and one environment directory. That is not a
+coincidence to be waited out: the fingerprint that names the environment is built out of the DBMS
+coordinates and the admin account (see FR-ENV-1 in the spec), and it holds nothing that would tell
+one consumer's project from another's. Run at the same time, the two drop each other's tables — the
+installation removes everything with the prefix, and `RefreshesDatabase` reloads the snapshot over
+somebody else's data in the middle of their test.
+
+Since 1.3.0 the second run is refused with `ConcurrentRunException` instead of being let in to do
+the damage. The refusal is the symptom; the cure is a database of its own:
+
+```xml
+<phpunit>
+    <php>
+        <env name="MODX_TESTBENCH_DB_NAME" value="modx_testbench_myextra"/>
+    </php>
+</phpunit>
+```
+
+Or, in the shell and in CI:
+
+```bash
+export MODX_TESTBENCH_DB_NAME=modx_testbench_myextra
+```
+
+The name only has to be unique among the projects that share the server; the database is created by
+the package itself if it is missing. One DBMS container serves any number of projects — the port is
+not what collides.
+
+A database of its own changes the fingerprint, so the project gets an environment directory of its
+own as well, installed once (the first run after the change costs the usual few minutes and the
+following ones do not). The environment of the other project stays where it is and is not touched.
+
+**What the guard does and does not do.** It is held for the whole run rather than for the
+installation alone, because the damaging case is two runs that both find the environment ready. It
+is released by the operating system together with the process that took it — a run killed with
+`kill -9` frees the environment, and there is no stale lock to clean up by hand. Subprocesses of the
+run are not another run: the build script of a transport package boots the very same environment,
+and it is let through. Where the guard cannot be taken at all — a private cache directory that
+cannot be created — the run proceeds unguarded rather than failing.
+
+`MODX_TESTBENCH_ALLOW_CONCURRENT=1` switches the guard off. It is for the case where several
+processes over ONE environment are deliberate — a parallel runner, for instance. The package does
+not make such a run safe; it stops refusing it, and keeping the processes out of each other's way
+becomes yours.
 
 ## 9. Wiring up CI
 

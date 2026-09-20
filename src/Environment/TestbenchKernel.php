@@ -29,6 +29,15 @@ final class TestbenchKernel
 
     private bool $prepared = false;
 
+    /**
+     * The hold on this environment for the lifetime of the run ({@see RunLock}). A field and not a
+     * local variable: the lock IS the open descriptor, and a descriptor dropped at the end of
+     * `prepare()` would free the environment for the next run while this one is still testing in
+     * it. `null` means the guard was not taken — the opt-out, or a private cache directory that
+     * could not be created.
+     */
+    private ?RunLock $runLock = null;
+
     private function __construct(
         private readonly TestbenchConfig $config,
         private readonly Workspace $workspace,
@@ -90,6 +99,14 @@ final class TestbenchKernel
         if ($this->prepared) {
             return $this->workspace;
         }
+
+        // BEFORE the "already installed" branch below, and that order is the whole guard: the case
+        // it exists for is two runs that BOTH find the environment ready and then drop each other's
+        // tables in the middle of a test. A guard placed after that branch would let exactly those
+        // two through. The order is pinned by
+        // `tests/Unit/Environment/KernelRunLockTest.php` and
+        // `tests/Integration/Environment/ConcurrentRunTest.php`.
+        $this->runLock ??= RunLock::acquire($this->config);
 
         if (!$this->config->forceInstall
             && $this->workspace->isInstalledWith($this->config->fingerprint())

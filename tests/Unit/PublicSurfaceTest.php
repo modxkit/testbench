@@ -62,6 +62,7 @@ final class PublicSurfaceTest extends TestCase
         // The whole exception hierarchy: a consumer catches these by name, and the DX guide has a
         // table of them with what each one means.
         \ModxKit\Testbench\Exception\TestbenchException::class => 'the root of the hierarchy the consumer catches',
+        \ModxKit\Testbench\Exception\ConcurrentRunException::class => 'exception hierarchy',
         \ModxKit\Testbench\Exception\CoreDownloadFailedException::class => 'exception hierarchy',
         \ModxKit\Testbench\Exception\CoreTransportUnpackException::class => 'exception hierarchy',
         \ModxKit\Testbench\Exception\InstallationFailedException::class => 'exception hierarchy',

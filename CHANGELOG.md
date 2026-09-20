@@ -4,6 +4,30 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.3.0 — 2026-09-20
+
+### Added
+
+- **A guard against two runs sharing one environment.** Two projects that both leave
+  `MODX_TESTBENCH_DB_NAME` alone share more than a DBMS server: the environment fingerprint
+  is built out of the DBMS coordinates and the admin account, so they get one database, one
+  table prefix and one environment directory. Run at the same time, they dropped each
+  other's tables — the installation removes everything with the prefix, and
+  `RefreshesDatabase` reloads the snapshot over data another run is in the middle of using.
+  The second run is now refused with `ConcurrentRunException`, and the message names the
+  holder and both ways out: a database of its own, or the opt-out below. The hold lasts the
+  whole run rather than the installation alone, because the damaging case is two runs that
+  both find the environment ready; it is an open descriptor, so the operating system
+  releases it — a run killed with `kill -9` leaves no stale lock behind. Subprocesses of the
+  run itself are let through: the build script of a transport package boots the very same
+  environment, and refusing it would break a documented feature. Where the guard cannot be
+  taken at all, the run proceeds unguarded rather than failing. See "Two projects on one
+  DBMS" in the DX guide.
+
+- **`MODX_TESTBENCH_ALLOW_CONCURRENT=1`** turns the guard off, for the case where several
+  processes over one environment are deliberate. It does not make such a run safe; it stops
+  refusing it.
+
 ## 1.2.1 — 2026-09-20
 
 **A reissue of 1.2.0 under a reachable commit. The only difference from 1.2.0 is this

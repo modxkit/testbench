@@ -44,7 +44,7 @@ final readonly class Workspace
      * {@see self::exposedDirectories()} and the test
      * `WorkspaceDefaultLocationTest::testExposureIsAnnouncedWhenTheParentDirectoryWasPreparedWithALooseMode()`.
      */
-    private const DEFAULT_SUFFIX = '/modx-testbench/workspaces/';
+    private const DEFAULT_SUFFIX = '/workspaces/';
 
     /**
      * Mode of the environment directory. Not decoration: inside lies `core/config/config.inc.php`
@@ -150,14 +150,7 @@ final readonly class Workspace
      */
     private static function defaultLocation(TestbenchConfig $config): string
     {
-        $base = Env::get('XDG_CACHE_HOME');
-
-        if ($base === null) {
-            $home = Env::get('HOME');
-            $base = $home === null ? null : $home . '/.cache';
-        }
-
-        return rtrim($base ?? sys_get_temp_dir(), '/') . self::DEFAULT_SUFFIX . $config->fingerprint();
+        return PrivateCacheDirectory::path() . self::DEFAULT_SUFFIX . $config->fingerprint();
     }
 
     /**

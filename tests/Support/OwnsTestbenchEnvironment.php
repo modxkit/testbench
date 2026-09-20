@@ -20,7 +20,7 @@ use ModxKit\Testbench\Environment\TestbenchConfig;
  * absence (`null`) did not tell "the variable was not there" from "the variable was `null`".
  *
  * Merged from two byte-identical copies ({@see \ModxKit\Testbench\Tests\Unit\Environment\TestbenchConfigTest}
- * and {@see \ModxKit\Testbench\Tests\Unit\Installer\ConfigXmlWriterTest}): the list of 18
+ * and {@see \ModxKit\Testbench\Tests\Unit\Installer\ConfigXmlWriterTest}): the list of 19
  * variables would otherwise have to be kept up to date in two places at once.
  */
 trait OwnsTestbenchEnvironment
@@ -40,6 +40,7 @@ trait OwnsTestbenchEnvironment
         'MODX_TESTBENCH_CACHE_DIR',
         'MODX_TESTBENCH_WORKSPACE',
         'MODX_TESTBENCH_FORCE_INSTALL',
+        'MODX_TESTBENCH_ALLOW_CONCURRENT',
         'MODX_TESTBENCH_DB_HOST',
         'MODX_TESTBENCH_DB_PORT',
         'MODX_TESTBENCH_DB_NAME',

@@ -176,6 +176,7 @@ those variables determine is the subject of "What exactly causes a reinstall" be
 | `MODX_TESTBENCH_WORKSPACE`     | Override of the environment directory (**the directory is deleted in full** on reinstall — see below)                     | `$XDG_CACHE_HOME/modx-testbench/workspaces/<hash>`, else `$HOME/.cache/modx-testbench/workspaces/<hash>`, else `sys_get_temp_dir()/modx-testbench/workspaces/<hash>` — see below |
 | `MODX_TESTBENCH_CACHE_DIR`     | Release cache directory                                                                                                   | `$XDG_CACHE_HOME/modx-testbench`, else `$HOME/.cache/modx-testbench`, else `sys_get_temp_dir()/.cache/modx-testbench`                                                            |
 | `MODX_TESTBENCH_FORCE_INSTALL` | Force a clean reinstall                                                                                                   | `0`                                                                                                                                                                              |
+| `MODX_TESTBENCH_ALLOW_CONCURRENT` | Allow several runs to share one environment (turns the guard off — see "Two projects on one DBMS" in the DX guide)    | `0`                                                                                                                                                                              |
 | `MODX_TESTBENCH_DB_HOST`       | DBMS host                                                                                                                 | `127.0.0.1`                                                                                                                                                                      |
 | `MODX_TESTBENCH_DB_PORT`       | DBMS port                                                                                                                 | `3306`                                                                                                                                                                           |
 | `MODX_TESTBENCH_DB_NAME`       | Test database name (created automatically if absent)                                                                      | `modx_testbench`                                                                                                                                                                 |
@@ -199,9 +200,14 @@ scratch; the environment installed with the previous values stays where it is an
 put them back.
 
 Parameters that do not determine the installation do not change the fingerprint:
-`MODX_TESTBENCH_CACHE_DIR`, `MODX_TESTBENCH_WORKSPACE`, `MODX_TESTBENCH_FORCE_INSTALL`, and the
-parameters of the provider that is not currently selected (`MODX_TESTBENCH_GIT_REF` with
-`provider=zip` and vice versa).
+`MODX_TESTBENCH_CACHE_DIR`, `MODX_TESTBENCH_WORKSPACE`, `MODX_TESTBENCH_FORCE_INSTALL`,
+`MODX_TESTBENCH_ALLOW_CONCURRENT`, and the parameters of the provider that is not currently
+selected (`MODX_TESTBENCH_GIT_REF` with `provider=zip` and vice versa).
+
+The other side of the same coin: `MODX_TESTBENCH_DB_NAME` DOES change the fingerprint, and that is
+what gives a project an environment of its own. Two projects that both leave it alone share one
+database, one table prefix and one environment directory — see "Two projects on one DBMS" in the DX
+guide.
 
 > **Upgrading from an earlier version of the package to this one.** Both the composition of the
 > fingerprint and the directory in which the package keeps environments have changed (see the next
