@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.2.1 — 2026-09-20
+
+**A reissue of 1.2.0 under a reachable commit. The only difference from 1.2.0 is this
+changelog entry.**
+
+After 1.2.0 was tagged, the two commits behind it were squashed into one and the tag was
+recreated on the squashed commit. Packagist refuses to change the source reference of a
+published stable version — by design, so that moving a tag cannot swap the contents of a
+release people have already installed. Its metadata for 1.2.0 therefore still points at the
+pre-squash commit, which is no longer reachable from any branch or tag here.
+
+Nothing is broken today: the files are byte for byte the same, because squashing did not
+change the tree. But an unreachable commit is not something to leave a release standing on.
+1.2.1 is the same code under a reference that is reachable from `main`, which is the way
+Packagist itself prescribes for publishing such a change.
+
+Use `^1.2` and you get it automatically.
+
 ## 1.2.0 — 2026-09-20
 
 ### Added
