@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.4.0 — 2026-09-20
+
+### Added
+
+- **`AGENTS.md`, and it ships with the package.** Tests for MODX extras are now largely
+  written by AI agents, and the things that cost them the most are not in the API: the
+  level to start at, that the core is not to be mocked, that DDL breaks the test
+  transaction, that permissions answer "allowed" to everybody until `enforcePermissions()`
+  is called, and that a project wants a database of its own. The file is short and points
+  at the DX guide rather than repeating it. It is listed in `.gitattributes` on purpose:
+  an agent working in a consumer's project sees `vendor/modxkit/testbench/`, never this
+  repository, and `docs/` is not shipped. Contributors are sent to `CONTRIBUTING.md` by
+  its first line.
+
+### Changed
+
+- **The tables in the documentation are aligned again.** Rows added over the last releases
+  were wider than the column they went into, and the tables of `README.md` and
+  `docs/SPEC.md` had drifted out of shape. Formatting only: not a word of their content
+  changed.
+
 ## 1.3.0 — 2026-09-20
 
 ### Added

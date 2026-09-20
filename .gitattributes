@@ -28,3 +28,6 @@
 /LICENSE        -export-ignore
 /README.md      -export-ignore
 /README.ru.md   -export-ignore
+# AGENTS.md is written for the agent of a CONSUMER, so it has to travel with the package:
+# an agent working in somebody else's project sees vendor/, not this repository.
+/AGENTS.md      -export-ignore
