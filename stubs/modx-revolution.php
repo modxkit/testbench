@@ -1252,6 +1252,22 @@ namespace MODX\Revolution {
      */
     abstract class modPrincipal extends xPDOSimpleObject
     {
+        /**
+         * The principal's ACL attributes for the context. With `$reload` the cached copy in
+         * `$_SESSION` is dropped and the attributes are read from the database again
+         * (core/src/Revolution/modUser.php:152-195).
+         *
+         * @see core/src/Revolution/modPrincipal.php:59
+         *
+         * @param array<int, string> $targets
+         * @param string             $context
+         * @param bool               $reload
+         *
+         * @return array<string, mixed>
+         */
+        public function getAttributes($targets = [], $context = '', $reload = false)
+        {
+        }
     }
 
     /**

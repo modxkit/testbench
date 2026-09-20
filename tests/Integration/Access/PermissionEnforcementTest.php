@@ -5,11 +5,8 @@ declare(strict_types=1);
 namespace ModxKit\Testbench\Tests\Integration\Access;
 
 use MODX\Revolution\Error\modError;
-use MODX\Revolution\modUser;
-use MODX\Revolution\modUserGroup;
-use MODX\Revolution\modUserGroupMember;
-use MODX\Revolution\modUserGroupRole;
 use MODX\Revolution\modX;
+use ModxKit\Testbench\Exception\TestbenchException;
 use ModxKit\Testbench\TestCase;
 use PHPUnit\Framework\Attributes\Group;
 
@@ -66,7 +63,7 @@ final class PermissionEnforcementTest extends TestCase
     public function testEnforcementGrantsAMemberOfAdministrator(): void
     {
         $user = $this->createUser();
-        $this->joinAdministrators($user);
+        $this->joinUserGroup($user, 'Administrator');
 
         $this->enforcePermissions();
         $this->actingAs($user);
@@ -122,7 +119,7 @@ final class PermissionEnforcementTest extends TestCase
         $this->modx->error->reset();
 
         $privileged = $this->createUser();
-        $this->joinAdministrators($privileged);
+        $this->joinUserGroup($privileged, 'Administrator');
         $this->actingAs($privileged);
 
         $this->assertProcessorSuccess(
@@ -177,27 +174,67 @@ final class PermissionEnforcementTest extends TestCase
     }
 
     /**
-     * The role decides whether a membership grants anything: `modAccessContext::loadAttributes()`
-     * joins the ACL with `mr.authority <= acl.authority`
-     * (`core/src/Revolution/modAccessContext.php:42-49`). A default install gives the context ACL
-     * authority 0, and only the `Super User` role (authority 0) satisfies it — `Member`
-     * (authority 9999) leaves the user with an empty attribute set and therefore with nothing.
+     * The membership is added AFTER the first permission check, which is the case the cache would
+     * otherwise answer wrongly: `modUser::loadAttributes()` keeps its copy in
+     * `$_SESSION["modx.user.{$id}.attributes"]` (`core/src/Revolution/modUser.php:167-194`), and
+     * before the helper reloaded them the pre-join answer survived the join.
      */
-    private function joinAdministrators(modUser $user): void
+    public function testMembershipAddedAfterTheFirstCheckTakesEffectAtOnce(): void
     {
-        $group = $this->modx->getObject(modUserGroup::class, ['name' => 'Administrator']);
-        $role = $this->modx->getObject(modUserGroupRole::class, ['name' => 'Super User']);
+        $user = $this->createUser();
 
-        self::assertNotNull($group, 'a default install carries the Administrator group');
-        self::assertNotNull($role, 'a default install carries the Super User role');
+        $this->enforcePermissions();
+        $this->actingAs($user);
 
-        $member = $this->modx->newObject(modUserGroupMember::class);
-        self::assertNotNull($member);
+        self::assertFalse($this->modx->hasPermission('save_document'), 'nothing yet');
 
-        $member->set('user_group', $group->get('id'));
-        $member->set('member', $user->get('id'));
-        $member->set('role', $role->get('id'));
+        $this->joinUserGroup($user, 'Administrator');
 
-        self::assertTrue($member->save());
+        self::assertTrue($this->modx->hasPermission('save_document'), 'and now the group counts');
+    }
+
+    /**
+     * The `Member` role is the trap the helper's default exists to avoid: authority 9999 satisfies
+     * no context ACL of authority 0, so the membership grants nothing at all. Asserted here rather
+     * than only described, because it is also a legitimate thing for a test to check.
+     */
+    public function testMemberRoleGrantsNothingAgainstTheContextAcl(): void
+    {
+        $user = $this->createUser();
+        $this->joinUserGroup($user, 'Administrator', 'Member');
+
+        $this->enforcePermissions();
+        $this->actingAs($user);
+
+        self::assertFalse($this->modx->hasPermission('save_document'));
+    }
+
+    public function testUnknownGroupNameIsRefusedAndTheMessageNamesWhatExists(): void
+    {
+        // Not two `expectExceptionMessage()` calls: PHPUnit keeps only the last one, so the first
+        // expectation would be dropped without a word and the test would check half of what it
+        // reads as checking.
+        try {
+            $this->joinUserGroup($this->createUser(), 'Editors');
+            self::fail('a group that does not exist must not yield a membership');
+        } catch (TestbenchException $exception) {
+            self::assertStringContainsString(
+                'MODX has no user group named "Editors"',
+                $exception->getMessage()
+            );
+            self::assertStringContainsString(
+                'Administrator',
+                $exception->getMessage(),
+                'and the message names the groups that do exist'
+            );
+        }
+    }
+
+    public function testUnknownRoleNameIsRefused(): void
+    {
+        $this->expectException(TestbenchException::class);
+        $this->expectExceptionMessage('MODX has no user group role named "Overlord"');
+
+        $this->joinUserGroup($this->createUser(), 'Administrator', 'Overlord');
     }
 }

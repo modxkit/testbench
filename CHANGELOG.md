@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.2.0 — 2026-09-20
+
+### Added
+
+- **`joinUserGroup()` on level 2 test cases.** Writing the "user who IS allowed" half of a
+  permission test meant assembling a `modUserGroupMember` by hand and knowing that the
+  role decides whether the membership grants anything at all. The helper looks the group
+  and the role up by name, refuses an unknown name with the names that do exist instead of
+  creating one, defaults the role to `Super User` because `Member` satisfies no context ACL
+  of a default install, and reloads the user's access attributes so that a membership added
+  after the first permission check counts at once.
+
 ## 1.1.0 — 2026-09-20
 
 ### Added

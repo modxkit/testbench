@@ -421,31 +421,38 @@ again.
 > nothing. `enforcePermissions()` restores the missing precondition, and the same two questions are
 > then answered `false`.
 
-To write the other half of the test — the user who IS allowed — put the user in a group. Two traps
-sit on that path, and both are MODX's, not the testbench's:
+To write the other half of the test — the user who IS allowed — put the user in a group with
+`joinUserGroup()`:
 
 ```php
-$user = $this->createUser();
+public function testCreateProcessorRunsForAnAuthorisedUser(): void
+{
+    $user = $this->createUser();
+    $this->joinUserGroup($user, 'Administrator');
 
-$member = $this->modx->newObject(modUserGroupMember::class);
-$member->set('user_group', $administrators->get('id'));
-$member->set('member', $user->get('id'));
-// NOT the "Member" role — see below.
-$member->set('role', $superUser->get('id'));
-$member->save();
+    $this->enforcePermissions();
+    $this->actingAs($user);
 
-$this->enforcePermissions();
-$this->actingAs($user);
+    $this->assertProcessorSuccess($this->runProcessor(Create::class, ['name' => 'nightly']));
+}
 ```
 
-> **The role decides whether the membership grants anything.**
+The group is named as the manager shows it and MUST already exist: a name that is not found raises
+`TestbenchException` listing the names that ARE there, rather than quietly creating a group nobody
+meant. The membership may be added after the first permission check — the helper reloads the user's
+ACL attributes, so it counts immediately.
+
+> **The third argument is the role, and its default is not an arbitrary one.**
 > `modAccessContext::loadAttributes()` joins the ACL with `mr.authority <= acl.authority`
 > (`core/src/Revolution/modAccessContext.php:42-49`). A default install gives the context ACL
 > authority 0, while the `Member` role carries authority 9999 — so a membership in that role
 > satisfies no context ACL, the user's attribute set comes back empty, and the user is refused
-> exactly as if the membership were not there. `Super User` (authority 0) is what satisfies it.
-> Measured on 3.2.3-pl: the same user, the same group, `Member` → `save_document` refused,
-> `Super User` → granted.
+> exactly as if the membership were not there. `Super User` (authority 0) is what satisfies it, and
+> that is the helper's default. Pass `'Member'` explicitly when the refusal is the point:
+>
+> ```php
+> $this->joinUserGroup($user, 'Administrator', 'Member');
+> ```
 
 > **`sudo` cannot be mass-assigned, and it proves less than it looks.** `modUser::set()` refuses the
 > field outright outside setup mode (`core/src/Revolution/modUser.php:55-62`), so

@@ -9,6 +9,9 @@ use MODX\Revolution\modResource;
 use MODX\Revolution\modSnippet;
 use MODX\Revolution\modSystemSetting;
 use MODX\Revolution\modUser;
+use MODX\Revolution\modUserGroup;
+use MODX\Revolution\modUserGroupMember;
+use MODX\Revolution\modUserGroupRole;
 use MODX\Revolution\modUserProfile;
 use MODX\Revolution\modX;
 use MODX\Revolution\Processors\ProcessorResponse;
@@ -130,6 +133,81 @@ trait InteractsWithModx
         }
 
         return $user;
+    }
+
+    /**
+     * Puts the user into a group, in a role that really grants something.
+     *
+     * The role is the half that is easy to get wrong, which is why it has a default rather than
+     * being left to the caller. `modAccessContext::loadAttributes()` joins the ACL with
+     * `mr.authority <= acl.authority` (`core/src/Revolution/modAccessContext.php:42-49`), and a
+     * default install gives the context ACL authority 0. `Super User` carries authority 0 and
+     * satisfies it; `Member` carries 9999 and satisfies nothing, so a membership in that role
+     * leaves the user's attribute set empty and the user refused exactly as if no membership
+     * existed. Pass `Member` explicitly when that refusal is what the test is about.
+     *
+     * The group and the role are looked up by name and MUST already exist: creating them silently
+     * would turn a mistyped name into a membership in a group nobody meant, and the test would go
+     * green for the wrong reason. A name that is not found raises with the list of names that are.
+     *
+     * Under `enforcePermissions()` the user's ACL attributes are reloaded right away
+     * (`modPrincipal::getAttributes()` with `$reload`), so a membership added AFTER the first
+     * permission check takes effect immediately. Without that the core would keep answering from
+     * the copy it cached in `$_SESSION` on that first check — measured: the pre-join answer
+     * survived the join.
+     *
+     * @param string $group The group's `name`, as the manager shows it, e.g. `Administrator`.
+     * @param string $role  The role's `name`, e.g. `Super User` or `Member`.
+     */
+    protected function joinUserGroup(
+        modUser $user,
+        string $group,
+        string $role = 'Super User',
+    ): modUserGroupMember {
+        $groupObject = $this->modx->getObject(modUserGroup::class, ['name' => $group]);
+
+        if (!$groupObject instanceof modUserGroup) {
+            throw new TestbenchException(sprintf(
+                'MODX has no user group named "%s". The groups that exist are: %s. The name is the '
+                . '`name` field of modUserGroup, spelled as the manager shows it.',
+                $group,
+                $this->existingNames(modUserGroup::class)
+            ));
+        }
+
+        $roleObject = $this->modx->getObject(modUserGroupRole::class, ['name' => $role]);
+
+        if (!$roleObject instanceof modUserGroupRole) {
+            throw new TestbenchException(sprintf(
+                'MODX has no user group role named "%s". The roles that exist are: %s.',
+                $role,
+                $this->existingNames(modUserGroupRole::class)
+            ));
+        }
+
+        $member = $this->newModxObject(modUserGroupMember::class);
+        $member->set('user_group', $groupObject->get('id'));
+        $member->set('member', $user->get('id'));
+        $member->set('role', $roleObject->get('id'));
+
+        if (!$member->save()) {
+            $username = $user->get('username');
+
+            throw new TestbenchException(sprintf(
+                'Failed to save the membership of user "%s" in the group "%s": MODX rejected the '
+                . 'write. The user must already be saved, and the same user cannot be added to the '
+                . 'same group twice; the details are in core/cache/logs/error.log of the working '
+                . 'environment.',
+                is_string($username) ? $username : '(no username)',
+                $group
+            ));
+        }
+
+        if ($this->permissionsEnforced) {
+            $user->getAttributes([], '', true);
+        }
+
+        return $member;
     }
 
     protected function createChunk(string $name, string $content): modChunk
@@ -462,6 +540,29 @@ trait InteractsWithModx
         }
 
         $this->modxOptionBackups = [];
+    }
+
+    /**
+     * The `name` values present for the class, for an error message that says what IS there rather
+     * than only what is not.
+     *
+     * @param class-string<xPDOObject> $class
+     */
+    private function existingNames(string $class): string
+    {
+        $names = [];
+
+        foreach ($this->modx->getCollection($class) as $object) {
+            $name = $object->get('name');
+
+            if (is_string($name)) {
+                $names[] = $name;
+            }
+        }
+
+        sort($names);
+
+        return $names === [] ? '(none at all)' : implode(', ', $names);
     }
 
     private function backupModxOption(string $key): void
