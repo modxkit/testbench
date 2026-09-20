@@ -759,11 +759,38 @@ namespace MODX\Revolution\Processors {
     abstract class Processor
     {
         /**
+         * @see core/src/Revolution/Processors/Processor.php:23-27
+         *
+         * @var \MODX\Revolution\modX
+         */
+        public $modx;
+
+        /**
+         * The permission the processor guards itself with. The base `checkPermissions()` ignores
+         * it and answers `true`; `ModelProcessor::checkPermissions()` is what consults it
+         * (core/src/Revolution/Processors/ModelProcessor.php:37-40).
+         *
+         * @see core/src/Revolution/Processors/Processor.php:38-42
+         *
+         * @var string
+         */
+        public $permission = '';
+
+        /**
          * @see core/src/Revolution/Processors/Processor.php:185
          *
          * @return mixed
          */
         abstract public function process();
+
+        /**
+         * @see core/src/Revolution/Processors/Processor.php:94-97
+         *
+         * @return bool
+         */
+        public function checkPermissions()
+        {
+        }
 
         /**
          * @see core/src/Revolution/Processors/Processor.php:221
@@ -959,11 +986,53 @@ namespace MODX\Revolution {
     class modX extends xPDO
     {
         /**
+         * The four states of the PHP session as the core sees them. `checkPolicy()` evaluates
+         * access policies ONLY in `SESSION_STATE_INITIALIZED`
+         * (core/src/Revolution/modAccessibleObject.php:252); under `XPDO_CLI_MODE` the core reports
+         * `SESSION_STATE_UNAVAILABLE` (modX.php:2281-2291), so a test process never reaches the
+         * first state by itself.
+         *
+         * @see core/src/Revolution/modX.php:56,61,66,71
+         */
+        public const SESSION_STATE_UNAVAILABLE = -1;
+
+        public const SESSION_STATE_UNINITIALIZED = 0;
+
+        public const SESSION_STATE_INITIALIZED = 1;
+
+        public const SESSION_STATE_EXTERNAL = 2;
+
+        /**
          * @see core/src/Revolution/modX.php:73-75
          *
          * @var Container
          */
         public $services;
+
+        /**
+         * Asks the CURRENT context whether the current user holds the permission. Forwards to
+         * `modContext::checkPolicy()`, which answers `true` unconditionally outside
+         * `SESSION_STATE_INITIALIZED` — see the constants above and
+         * `InteractsWithModx::enforcePermissions()`.
+         *
+         * @see core/src/Revolution/modX.php:2041
+         *
+         * @param string $pm
+         *
+         * @return bool
+         */
+        public function hasPermission($pm)
+        {
+        }
+
+        /**
+         * @see core/src/Revolution/modX.php:2281
+         *
+         * @return int
+         */
+        public function getSessionState()
+        {
+        }
 
         /**
          * Re-reads the configuration from the database, regenerating the core file cache along the
@@ -1190,12 +1259,55 @@ namespace MODX\Revolution {
      */
     class modUser extends modPrincipal
     {
+        /**
+         * The only way to raise `sudo`. `modUser::set()` refuses the field outright outside setup
+         * mode (core/src/Revolution/modUser.php:55-62), so `fromArray(['sudo' => true])` — and with
+         * it `InteractsWithModx::createUser(['sudo' => true])` — leaves the user ordinary and says
+         * nothing about it.
+         *
+         * @see core/src/Revolution/modUser.php:80-86
+         *
+         * @param bool $sudo
+         *
+         * @return bool
+         */
+        public function setSudo($sudo)
+        {
+        }
     }
 
     /**
      * @see core/src/Revolution/modUserProfile.php:38
      */
     class modUserProfile extends xPDOSimpleObject
+    {
+    }
+
+    /**
+     * @see core/src/Revolution/modUserGroup.php:19
+     */
+    class modUserGroup extends modPrincipal
+    {
+    }
+
+    /**
+     * The membership row that ties a user to a group in a role. Whether the membership grants
+     * anything is decided by the role's authority against the ACL row's authority:
+     * `modAccessContext::loadAttributes()` joins with `mr.authority <= acl.authority`
+     * (core/src/Revolution/modAccessContext.php:42-49), so the `Member` role (authority 9999)
+     * matches no context ACL of a default install, while `Super User` (authority 0) matches one of
+     * authority 0.
+     *
+     * @see core/src/Revolution/modUserGroupMember.php:17
+     */
+    class modUserGroupMember extends xPDOSimpleObject
+    {
+    }
+
+    /**
+     * @see core/src/Revolution/modUserGroupRole.php:22
+     */
+    class modUserGroupRole extends xPDOSimpleObject
     {
     }
 

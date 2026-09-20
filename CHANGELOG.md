@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.1.0 — 2026-09-20
+
+### Added
+
+- **`enforcePermissions()` on level 2 test cases.** Until now no test could prove that a
+  processor asks for the permission it ought to: outside an initialised session
+  `modAccessibleObject::checkPolicy()` evaluates no policy and answers `true`, and under
+  PHPUnit the session state is always `SESSION_STATE_UNAVAILABLE` because `XPDO_CLI_MODE`
+  is true. A user belonging to no group was granted `save_document` — and a permission that
+  exists nowhere just the same. After the call the same questions are answered from the
+  database, and the mode is undone at the end of the test. See "Permissions" in
+  [docs/DX_GUIDE.md](docs/DX_GUIDE.md), which also records the two MODX traps on the way to
+  an authorised user: the role authority that decides whether a group membership grants
+  anything, and `sudo`, which cannot be mass-assigned and proves less than it looks.
+
 ## 1.0.0 — 2026-09-05
 
 First public release. Everything below is new — there is no earlier published version to

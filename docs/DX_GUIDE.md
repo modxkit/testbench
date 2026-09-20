@@ -385,6 +385,84 @@ There are two assertions: `assertProcessorFailure()` and `assertProcessorSuccess
 > processors are built. A processor WITHOUT such a guard returns `success => true`, and the foreign
 > errors travel unnoticed inside the raw response — which is worse, not better.
 
+### Permissions
+
+**By default MODX grants every permission to everybody in a test, so a permission check cannot be
+tested until you switch the checking on.** Call `enforcePermissions()` first:
+
+```php
+public function testCreateProcessorRequiresThePermission(): void
+{
+    $this->enforcePermissions();
+
+    $this->actingAs($this->createUser());
+    $this->assertProcessorFailure($this->runProcessor(Create::class, ['name' => 'nightly']));
+}
+```
+
+The mode lasts one test: `tearDown()` puts the core back, and the next test starts with the default
+again.
+
+> **Why the default grants everything.** `$modx->hasPermission()` forwards to
+> `modContext::checkPolicy()`, and the whole body of `modAccessibleObject::checkPolicy()` sits
+> behind `getSessionState() == modX::SESSION_STATE_INITIALIZED`
+> (`core/src/Revolution/modAccessibleObject.php:252`); past that guard the method falls through to
+> `return true`. Under PHPUnit the guard can never hold by itself: `modX::getSessionState()` answers
+> `SESSION_STATE_UNAVAILABLE` whenever `XPDO_CLI_MODE` is true
+> (`core/src/Revolution/modX.php:2281-2291`), and that constant is `PHP_SAPI === 'cli'`
+> (`core/vendor/xpdo/xpdo/src/xPDO/xPDO.php:34-39`).
+>
+> The line numbers in this section are those of MODX 3.2.3-pl. On 3.1.2-pl the same code sits at
+> other offsets in `modX.php`, so look the symbols up by name rather than by number.
+>
+> Measured on MODX 3.2.3-pl: a user belonging to no group at all is granted `save_document` — and is
+> granted `testbench_permission_that_does_not_exist` just the same. A test written against that
+> default is green on a user who holds nothing, which is the exact shape of a test that verifies
+> nothing. `enforcePermissions()` restores the missing precondition, and the same two questions are
+> then answered `false`.
+
+To write the other half of the test — the user who IS allowed — put the user in a group. Two traps
+sit on that path, and both are MODX's, not the testbench's:
+
+```php
+$user = $this->createUser();
+
+$member = $this->modx->newObject(modUserGroupMember::class);
+$member->set('user_group', $administrators->get('id'));
+$member->set('member', $user->get('id'));
+// NOT the "Member" role — see below.
+$member->set('role', $superUser->get('id'));
+$member->save();
+
+$this->enforcePermissions();
+$this->actingAs($user);
+```
+
+> **The role decides whether the membership grants anything.**
+> `modAccessContext::loadAttributes()` joins the ACL with `mr.authority <= acl.authority`
+> (`core/src/Revolution/modAccessContext.php:42-49`). A default install gives the context ACL
+> authority 0, while the `Member` role carries authority 9999 — so a membership in that role
+> satisfies no context ACL, the user's attribute set comes back empty, and the user is refused
+> exactly as if the membership were not there. `Super User` (authority 0) is what satisfies it.
+> Measured on 3.2.3-pl: the same user, the same group, `Member` → `save_document` refused,
+> `Super User` → granted.
+
+> **`sudo` cannot be mass-assigned, and it proves less than it looks.** `modUser::set()` refuses the
+> field outright outside setup mode (`core/src/Revolution/modUser.php:55-62`), so
+> `createUser(['sudo' => true])` returns an ORDINARY user and says nothing about it; the flag is
+> raised by `$user->setSudo(true)` followed by `save()`. And a `sudo` user is no witness that a
+> check happened: `checkPolicy()` returns `true` for such a user before it looks at any policy
+> (`modAccessibleObject.php:256-258`), including for a permission that exists nowhere.
+
+Two more consequences of switching the mode on:
+
+- `modAccessibleObject::save()` and `::remove()` go through the same `checkPolicy()`
+  (`modAccessibleObject.php:210-218` and `225-233`), so fixtures built while acting as a restricted
+  user can start being refused. Build them before `actingAs()`.
+- The check is answered for the **current** context, and the testbench core is booted in `web`. A
+  default install carries a `modAccessContext` row for `web` as well as for `mgr`, so manager
+  permissions do resolve — but they resolve through the `web` row.
+
 ### System settings
 
 ```php

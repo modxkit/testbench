@@ -113,6 +113,7 @@ The key words MUST / SHOULD / MAY are to be interpreted as described in RFC 2119
 - **FR-API-3.** `actingAs(modUser)`, `runProcessor()` and `triggerEvent()` MUST be provided.
 - **FR-API-4.** Assertions MUST be provided: `assertObjectExists()`, `assertObjectMissing()`, `assertProcessorSuccess()`, `assertProcessorFailure()`, `assertSettingEquals()`.
 - **FR-API-5.** Every entity created by the helpers MUST disappear after the test by the means of the chosen isolation strategy.
+- **FR-API-6.** `enforcePermissions()` MUST be provided. Without it the core evaluates no access policy under PHPUnit and answers `true` to every permission for every user, so a permission check cannot be tested at all. The mode MUST last a single test and MUST leave the core as it found it.
 
 ### 4.8 Stub level (FR-STUB)
 

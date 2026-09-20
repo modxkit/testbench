@@ -10,8 +10,10 @@ use MODX\Revolution\modSnippet;
 use MODX\Revolution\modSystemSetting;
 use MODX\Revolution\modUser;
 use MODX\Revolution\modUserProfile;
+use MODX\Revolution\modX;
 use MODX\Revolution\Processors\ProcessorResponse;
 use ModxKit\Testbench\Exception\TestbenchException;
+use ReflectionProperty;
 use xPDO\Om\xPDOObject;
 
 /**
@@ -38,6 +40,23 @@ trait InteractsWithModx
     private bool $modxUserBackedUp = false;
 
     private ?modUser $modxUserBackup = null;
+
+    /** Set by `enforcePermissions()`; cleared by `restoreModxRuntimeState()`. */
+    private bool $permissionsEnforced = false;
+
+    /** The value `modX::$_sessionState` held before `enforcePermissions()` replaced it. */
+    private ?int $modxSessionStateBackup = null;
+
+    /**
+     * The `$_SESSION` superglobal as it was before `enforcePermissions()` emptied it; `null` means
+     * the superglobal did not exist at all and has to be removed again, not set to `[]`.
+     *
+     * @var array<mixed>|null
+     */
+    private ?array $phpSessionBackup = null;
+
+    /** Distinguishes "there was no `$_SESSION`" from "there was an empty one". */
+    private bool $phpSessionExisted = false;
 
     /**
      * @param array<string, mixed> $attributes
@@ -199,6 +218,91 @@ trait InteractsWithModx
         }
 
         $this->modx->user = $user;
+
+        // `modUser::loadAttributes()` caches the ACL attributes in
+        // `$_SESSION["modx.user.{$id}.attributes"]` and reads them back on the next call
+        // (`core/src/Revolution/modUser.php:167-194`). Under the transaction the ids are reused
+        // between tests, so a stale entry would answer for a DIFFERENT user carrying the same id.
+        // The whole superglobal goes rather than one key: under enforcement it is ours from the
+        // start (`enforcePermissions()` emptied it), and nothing there outlives the test anyway.
+        // It matters only while the policies are really evaluated.
+        if ($this->permissionsEnforced) {
+            $_SESSION = [];
+        }
+    }
+
+    /**
+     * Makes MODX really evaluate access policies instead of allowing everything.
+     *
+     * Without this call a level 2 test CANNOT prove that a processor asks for the permission it
+     * ought to. `modX::hasPermission()` forwards to `modContext::checkPolicy()`, and the entire
+     * body of `modAccessibleObject::checkPolicy()` sits behind
+     * `getSessionState() == modX::SESSION_STATE_INITIALIZED`
+     * (`core/src/Revolution/modAccessibleObject.php:252`); past that guard the method falls through
+     * to `return true`. Under PHPUnit the guard can never hold by itself: `getSessionState()`
+     * answers `SESSION_STATE_UNAVAILABLE` whenever `XPDO_CLI_MODE` is true
+     * (`core/src/Revolution/modX.php:2281-2291`), and that constant is `PHP_SAPI === 'cli'`
+     * (`core/vendor/xpdo/xpdo/src/xPDO/xPDO.php:34-39`). Measured on MODX 3.2.3-pl: a user with no
+     * groups at all got `true` for `save_document` and `true` for a permission that does not exist.
+     *
+     * After the call the same questions are answered from the database. Measured on the same core:
+     * the groupless user gets `false` for both, a member of `Administrator` holding the `Super
+     * User` role gets `true` for `save_document`, and a `sudo` user keeps getting `true` — the
+     * short circuit at `modAccessibleObject.php:256-258`.
+     *
+     * `restoreModxRuntimeState()` puts the state back in `TestCase::tearDown()`, so the mode lasts
+     * one test and never leaks into the next.
+     *
+     * Two consequences to know before switching it on:
+     *
+     * - `modAccessibleObject::save()` and `::remove()` check `save`/`remove` through the same
+     *   method (`modAccessibleObject.php:210-218` and `225-233`), so fixtures built while acting as a restricted
+     *   user can start being refused. Build them before `actingAs()`, or under a `sudo` user.
+     * - The check is answered for the CURRENT context, and the testbench core is booted in `web`.
+     *   A default install carries a `modAccessContext` row for `web` as well as for `mgr`, so
+     *   manager permissions do resolve — but they resolve through the `web` row.
+     *
+     * There is no public API for this. `modX::$_sessionState` is protected, and `startSession()`,
+     * its only public writer, acts only while the property is still
+     * `SESSION_STATE_UNINITIALIZED` (`modX.php:2456-2468`) — which `initialize()` has already left
+     * behind by the time a test runs. The property exists with the same meaning on both supported
+     * lines: verified against 3.1.2-pl and 3.2.3-pl. The line numbers above are those of 3.2.3-pl;
+     * on 3.1.2-pl the same code sits elsewhere in `modX.php`, so check by symbol, not by number.
+     */
+    protected function enforcePermissions(): void
+    {
+        if ($this->permissionsEnforced) {
+            return;
+        }
+
+        $property = new ReflectionProperty(modX::class, '_sessionState');
+
+        $state = $property->getValue($this->modx);
+
+        // The core declares the property as an int and never assigns anything else
+        // (`modX.php:243`, `2281-2291`, `2456-2468`). Anything else here means the core has changed
+        // shape, and a wrong backup would leave the NEXT test with a session state nobody chose.
+        if (!is_int($state)) {
+            throw new TestbenchException(sprintf(
+                'MODX holds %s in modX::$_sessionState instead of an int, so enforcePermissions() '
+                . 'cannot restore the value it is about to replace. The supported core lines are '
+                . '3.1.2-pl and 3.2.3-pl.',
+                get_debug_type($state)
+            ));
+        }
+
+        $this->modxSessionStateBackup = $state;
+        $property->setValue($this->modx, modX::SESSION_STATE_INITIALIZED);
+
+        // `loadAttributes()` reads and writes `$_SESSION` as a plain array and never asks whether a
+        // real PHP session was started, so an empty superglobal is all the core needs. It is
+        // emptied rather than left alone: whatever an earlier test cached there is keyed by user id,
+        // and the ids come back after every rollback.
+        $this->phpSessionExisted = array_key_exists('_SESSION', $GLOBALS);
+        $this->phpSessionBackup = $this->phpSessionExisted ? $_SESSION : null;
+        $_SESSION = [];
+
+        $this->permissionsEnforced = true;
     }
 
     /**
@@ -328,6 +432,25 @@ trait InteractsWithModx
             $this->modx->user = $this->modxUserBackup;
             $this->modxUserBackedUp = false;
             $this->modxUserBackup = null;
+        }
+
+        if ($this->permissionsEnforced) {
+            (new ReflectionProperty(modX::class, '_sessionState'))
+                ->setValue($this->modx, $this->modxSessionStateBackup);
+
+            if ($this->phpSessionExisted) {
+                $_SESSION = $this->phpSessionBackup;
+            } else {
+                // `unset($_SESSION)` inside a method drops the local binding and leaves the
+                // superglobal in place; the global entry is what has to go, so that the next test
+                // sees exactly what this one saw — no `$_SESSION` at all.
+                unset($GLOBALS['_SESSION']);
+            }
+
+            $this->permissionsEnforced = false;
+            $this->modxSessionStateBackup = null;
+            $this->phpSessionBackup = null;
+            $this->phpSessionExisted = false;
         }
 
         foreach ($this->modxOptionBackups as $key => [$existed, $value]) {
