@@ -144,6 +144,13 @@ subprocess is invisible to the detector, and cannot be otherwise: it is not subj
 transaction in principle. `RefreshesDatabase` is what that case needs; `TransportInstaller` inside
 a test transaction refuses to work on its own.
 
+**`RefreshesDatabase` is not free, and the price is worth knowing before the suite grows.** It
+restores the baseline snapshot after every test of the class, and a stock MODX baseline is 70
+`CREATE TABLE` against 28 rows: the DDL is what costs, not the data. Measured here at 3.4–4.1 s per
+restore against a DBMS configured for durability and 0.72–0.75 s against the one `ci/docker-compose.yml`
+now ships. Put the trait on the classes that need it rather than on a base class for everything, and
+use the shipped compose file — the reasoning is written out inside it.
+
 Besides the database, the core file cache `core/cache/` (except `logs/`) and the MySQL session
 variables are restored after every test; `$modx->error` is reset before every test. But
 `$modx->services`, `$xpdo->packages` and the files installed by a transport package live until the

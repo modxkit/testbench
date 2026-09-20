@@ -258,6 +258,98 @@ final class RunLockTest extends TestCase
         unset($_SERVER['MODX_TESTBENCH_RUN_TOKEN'], $_ENV['MODX_TESTBENCH_RUN_TOKEN']);
     }
 
+    /**
+     * A lock file nobody holds and nobody has touched for a week is litter: it is recreated by the
+     * next `fopen()` for a tenth of a millisecond. Without a sweep the directory grows forever —
+     * measured on the package's own machine, 91 files in a single day of work, because the suite's
+     * throwaway configurations produce a fingerprint apiece.
+     */
+    public function testAFreeLockFileNobodyTouchedForAWeekIsSweptAway(): void
+    {
+        $stale = $this->existingLockFile('stale', age: 8 * 86400);
+
+        $this->hold(TestbenchConfig::fromEnvironment());
+
+        self::assertFileDoesNotExist($stale);
+    }
+
+    /**
+     * Age alone is not permission to delete. A run that has been going for over a week is still a
+     * run, and unlinking the file under it is exactly the failure of mutual exclusion the file is
+     * kept outside the environment directory to avoid: the next process would create a new inode
+     * at the same path and both would hold "the" lock.
+     */
+    public function testALockFileSomebodyStillHoldsSurvivesTheSweepHoweverOldItIs(): void
+    {
+        $held = $this->existingLockFile('held', age: 400 * 86400);
+
+        $handle = fopen($held, 'c');
+        self::assertNotFalse($handle);
+        self::assertTrue(flock($handle, LOCK_EX | LOCK_NB));
+
+        try {
+            $this->hold(TestbenchConfig::fromEnvironment());
+
+            self::assertFileExists($held);
+        } finally {
+            fclose($handle);
+        }
+    }
+
+    public function testAFreeButRecentLockFileIsLeftAlone(): void
+    {
+        $recent = $this->existingLockFile('recent', age: 60);
+
+        $this->hold(TestbenchConfig::fromEnvironment());
+
+        self::assertFileExists($recent);
+    }
+
+    /** The sweep runs while we hold our own lock, and it must not sweep the hand that runs it. */
+    public function testOurOwnLockFileSurvivesTheSweep(): void
+    {
+        $config = TestbenchConfig::fromEnvironment();
+
+        $this->hold($config);
+
+        self::assertFileExists(RunLock::pathFor($config));
+    }
+
+    /**
+     * A file of somebody else's, in the same directory, under a name that is not ours. The sweep
+     * looks at `*.lock` and leaves everything else alone rather than tidying a directory it only
+     * shares.
+     */
+    public function testTheSweepTouchesNothingButLockFiles(): void
+    {
+        // Through the helper, so that the directory exists: it is created by the first `acquire()`,
+        // and this test writes into it before any lock has been taken.
+        $foreign = dirname($this->existingLockFile('neighbour', age: 400 * 86400)) . '/notes.txt';
+        self::assertNotFalse(file_put_contents($foreign, 'not ours'));
+        touch($foreign, time() - 400 * 86400);
+
+        $this->hold(TestbenchConfig::fromEnvironment());
+
+        self::assertFileExists($foreign);
+    }
+
+    /** Creates a lock file of the given age next to ours, without taking it. */
+    private function existingLockFile(string $name, int $age): string
+    {
+        $directory = dirname(RunLock::pathFor(TestbenchConfig::fromEnvironment()));
+
+        if (!is_dir($directory)) {
+            mkdir($directory, 0700, true);
+        }
+
+        $path = $directory . '/' . $name . '.lock';
+
+        file_put_contents($path, "0000000000000000\npid 1, started long ago, database \"whatever\"");
+        touch($path, time() - $age);
+
+        return $path;
+    }
+
     private function removeRecursively(string $path): void
     {
         if (!is_dir($path)) {

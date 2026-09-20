@@ -4,6 +4,56 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.5.0 — 2026-09-20
+
+### Added
+
+- **Stale lock files are swept.** The guard added in 1.3.0 left a file per environment
+  behind, and where configurations are one-off — a suite that mixes a throwaway database
+  name into the fingerprint, for instance — the directory grew without bound: 91 files in
+  a single day on the machine this package is developed on. A file that nobody holds and
+  that nobody has touched for a week is now deleted by the next run that passes through
+  the directory. Nothing is lost by it: the next run that needs the file creates it again.
+  Both conditions are required — age alone would delete the file of a long-running run,
+  and "nobody holds it" alone would churn the directory for every environment that happens
+  to be idle this second.
+
+### Changed
+
+- **The shipped `ci/docker-compose.yml` stops paying for durability nobody uses.** The
+  data directory of both services is now a tmpfs, the binary log and the doublewrite
+  buffer are off and the log is no longer flushed on every commit. A test database is
+  rebuilt constantly and outlives nothing on purpose, so those guarantees were bought and
+  thrown away. Measured on this package's development machine (macOS, Docker Desktop,
+  `mysql:8.0`, the 168 KB snapshot of a stock 3.2.3-pl, 70 tables verified after every
+  restore): **3.4–4.1 s per restore before, 0.72–0.75 s after**. End to end this package's
+  own integration suite went from **4 m 38 s to 2 m 08 s** over 194 tests, and the faster
+  run additionally installed its environment from scratch — which is the other half of the
+  check: MODX installs onto a tmpfs data directory and the suite is green on it. A report
+  from a consumer measured the same effect on their own suite, 184 s down to 47 s over 43
+  tests. Losing
+  the data costs exactly one restore, and that is checked in code rather than assumed —
+  `TestbenchKernel::databaseMatchesLock()` reloads the snapshot, which lives on disk in the
+  workspace. The MariaDB service gets the same flags; that it starts and reports them
+  applied is measured, the speed-up on it is not. Not measured on Linux either: the
+  bottleneck on macOS is a virtualised filesystem, and the gap there is likely smaller.
+
+- **The price of `RefreshesDatabase` is written down** in `README.md`, `README.ru.md`,
+  `AGENTS.md` and the DX guide. The trait restores the baseline after every test of the
+  class, and a stock MODX baseline is 70 `CREATE TABLE` against 28 rows of data — the DDL
+  is what costs, not the volume. Documented by what it does but never by what it costs, it
+  turned into minutes as a suite grew and looked like a regression of the package until
+  somebody measured it.
+
+### Fixed
+
+- **Deleting a lock file can no longer hand one environment to two runs.** A run that
+  opened a lock file a moment before a sweep deleted it would have taken the lock on a file
+  with no name, while the next run created a new one and locked that — two holders of one
+  environment, the exact failure the guard exists to prevent. Taking the lock now checks
+  that the file it holds is still the file the path names, and retries if it is not. The
+  defect was introduced together with the sweep and never shipped on its own.
+
 ## 1.4.0 — 2026-09-20
 
 ### Added

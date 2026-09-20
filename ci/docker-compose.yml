@@ -18,6 +18,34 @@
 # MariaDB deliberately listens on 3307 from the outside: both DBMSes must be able to run at the
 # same time so that one and the same working directory can be checked against both without
 # shutting the first one down. Inside the container both use the regular port 3306.
+# Why the durability of both servers below is turned down, and the data directory is a tmpfs.
+#
+# A test database is thrown away and rebuilt constantly: `RefreshesDatabase` restores the baseline
+# snapshot after every test it is used in, and a stock MODX snapshot is 70 `CREATE TABLE` against 28
+# rows of data — the cost is DDL, not volume. A binary log, a doublewrite buffer and an fsync per
+# transaction buy durability across a crash, and nothing here outlives a crash by design.
+#
+# Measured on this package's development machine (macOS, Docker Desktop, mysql:8.0, the 168 KB
+# snapshot of a stock 3.2.3-pl, 70 tables verified after every restore): 3.4–4.1 s per restore with
+# the settings this file used to carry, 0.72–0.75 s with the ones below. End to end, this package's
+# own integration suite — 194 tests — went from 4 m 38 s to 2 m 08 s, and the faster run additionally
+# installed its environment from scratch, work the slower one did not do. The install itself is the
+# other half of the check: MODX sets up on a tmpfs data directory and the suite is green on it. A report from a consumer
+# measured the same effect on their own suite — 184 s down to 47 s over 43 tests. NOT MEASURED on
+# Linux: the bottleneck on macOS is a virtualised filesystem, and the gap there is likely smaller.
+# The MariaDB service is given the same flags; that it accepts them and reports them applied is
+# measured, the speed-up on it is not.
+#
+# **Losing the data costs one restore, and that is checked in code, not assumed.** With the data
+# directory in RAM the database is empty after a container restart;
+# `TestbenchKernel::databaseMatchesLock()` compares the table count with `testbench.lock.json` and
+# reloads the snapshot — which lives in the workspace, on disk — and reinstalls the environment only
+# if there is no usable snapshot. Nothing about the environment directory is affected.
+#
+# The 1 GB is a ceiling, not a reservation: a tmpfs occupies what it holds. A stock MODX is a few
+# megabytes, so the room is for the fixtures of the extra under test. An extra whose fixtures
+# genuinely outgrow it should raise the number — or drop the `tmpfs:` block, keeping the flags,
+# which is most of the win.
 services:
   mysql:
     image: mysql:8.0
@@ -26,12 +54,18 @@ services:
       MYSQL_DATABASE: modx_testbench
     ports:
       - "3306:3306"
+    tmpfs:
+      - /var/lib/mysql:rw,size=1g
     # The option is alive only up to MySQL 8.4: measured — `mysql:8` (8.4.11) rejects it
     # (`unknown variable 'default-authentication-plugin=mysql_native_password'`) and fails while
     # initialising the data directory, whereas the `mysql:8.0` (8.0.46) pinned here accepts it.
     # This file does not order an image change; the line stays together with the image that
     # understands it.
-    command: --default-authentication-plugin=mysql_native_password
+    command: >
+      --default-authentication-plugin=mysql_native_password
+      --skip-log-bin
+      --innodb-doublewrite=0
+      --innodb-flush-log-at-trx-commit=0
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-ptestbench"]
       interval: 5s
@@ -45,6 +79,15 @@ services:
       MARIADB_DATABASE: modx_testbench
     ports:
       - "3307:3306"
+    tmpfs:
+      - /var/lib/mysql:rw,size=1g
+    # Measured that it starts with these and reports them applied
+    # (`@@innodb_doublewrite`, `@@innodb_flush_log_at_trx_commit`, `@@log_bin` all `0`).
+    # The speed-up itself was measured on MySQL only.
+    command: >
+      --skip-log-bin
+      --innodb-doublewrite=0
+      --innodb-flush-log-at-trx-commit=0
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 5s

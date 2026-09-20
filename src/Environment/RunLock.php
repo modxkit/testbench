@@ -74,6 +74,24 @@ final class RunLock
      */
     private const TOKEN_VARIABLE = 'MODX_TESTBENCH_RUN_TOKEN';
 
+    /**
+     * How long a lock file nobody holds is kept before it is swept.
+     *
+     * A file is worth nothing once its run is over — the next `fopen()` recreates it — so the
+     * threshold buys nothing but calm: an environment used at least weekly keeps its file, because
+     * every `acquire()` rewrites the record and with it the mtime. Without a sweep the directory
+     * grows without bound wherever configurations are one-off: 91 files in a single day on the
+     * machine this package is developed on, one per throwaway fingerprint of its own suite.
+     */
+    private const STALE_AFTER_SECONDS = 7 * 86400;
+
+    /**
+     * How many times taking the lock is retried when the file turns out to have been replaced
+     * under us. See {@see self::stillTheSameFile()}; three is not a tuned number, it is "more than
+     * the one collision the sweep can cause".
+     */
+    private const ATTEMPTS = 3;
+
     /** @param resource|null $handle the hold itself; closing it releases the lock */
     private function __construct(private $handle)
     {
@@ -126,42 +144,58 @@ final class RunLock
             return null;
         }
 
-        // 'c' and not 'w': 'w' truncates the file on open, and the holder's record would be wiped
-        // by the very process that is about to be refused.
-        $handle = @fopen($path, 'c');
+        for ($attempt = 0; $attempt < self::ATTEMPTS; $attempt++) {
+            // 'c' and not 'w': 'w' truncates the file on open, and the holder's record would be
+            // wiped by the very process that is about to be refused.
+            $handle = @fopen($path, 'c');
 
-        if ($handle === false) {
-            return null;
-        }
-
-        if (!flock($handle, LOCK_EX | LOCK_NB)) {
-            $held = self::read($path);
-            fclose($handle);
-
-            // Our own child: it inherited the token together with the rest of the environment.
-            // It gets no lock object of its own — the lock is already held by the run it belongs
-            // to, and holding it twice would mean releasing it twice.
-            if ($held['token'] !== '' && $held['token'] === Env::get(self::TOKEN_VARIABLE)) {
+            if ($handle === false) {
                 return null;
             }
 
-            throw ConcurrentRunException::heldBy($held['record'], $config->database->name, $path);
+            if (!flock($handle, LOCK_EX | LOCK_NB)) {
+                $held = self::read($path);
+                fclose($handle);
+
+                // Our own child: it inherited the token together with the rest of the environment.
+                // It gets no lock object of its own — the lock is already held by the run it
+                // belongs to, and holding it twice would mean releasing it twice.
+                if ($held['token'] !== '' && $held['token'] === Env::get(self::TOKEN_VARIABLE)) {
+                    return null;
+                }
+
+                throw ConcurrentRunException::heldBy($held['record'], $config->database->name, $path);
+            }
+
+            if (!self::stillTheSameFile($handle, $path)) {
+                fclose($handle);
+
+                continue;
+            }
+
+            // The token belongs to the RUN, not to this one lock: a run that takes a second
+            // environment keeps the token its children already carry. Minting a fresh one here
+            // disowned them — they went on presenting the old token to the file of the FIRST lock,
+            // which now held a different one, and were refused entry into the environment their
+            // own parent was holding.
+            $token = Env::get(self::TOKEN_VARIABLE) ?? bin2hex(random_bytes(8));
+
+            ftruncate($handle, 0);
+            rewind($handle);
+            fwrite($handle, $token . "\n" . self::record($config));
+            fflush($handle);
+
+            self::publish($token);
+
+            // With our own lock in hand: the sweep skips whatever is held, and ours is held.
+            self::sweepStale($directory, $path);
+
+            return new self($handle);
         }
 
-        // The token belongs to the RUN, not to this one lock: a run that takes a second environment
-        // keeps the token its children already carry. Minting a fresh one here disowned them —
-        // they went on presenting the old token to the file of the FIRST lock, which now held a
-        // different one, and were refused entry into the environment their own parent was holding.
-        $token = Env::get(self::TOKEN_VARIABLE) ?? bin2hex(random_bytes(8));
-
-        ftruncate($handle, 0);
-        rewind($handle);
-        fwrite($handle, $token . "\n" . self::record($config));
-        fflush($handle);
-
-        self::publish($token);
-
-        return new self($handle);
+        // Three collisions in a row is not a situation to keep fighting: proceed unguarded rather
+        // than fail a test run over a protective measure (FR-ENV-9).
+        return null;
     }
 
     /**
@@ -183,6 +217,91 @@ final class RunLock
         putenv(self::TOKEN_VARIABLE . '=' . $token);
         $_SERVER[self::TOKEN_VARIABLE] = $token;
         $_ENV[self::TOKEN_VARIABLE] = $token;
+    }
+
+    /**
+     * Is the descriptor we locked still the file that path names?
+     *
+     * The sweep below deletes files, and deletion opens a window: a process may have opened the
+     * file a moment before the unlink, and would then take `flock()` on an inode that no longer
+     * has a name. The next process, finding no file, would create one and lock that — two holders
+     * of one environment, which is the whole thing this class exists to prevent. Comparing the
+     * inode we hold with the inode the path resolves to closes the window: a mismatch means the
+     * file was replaced under us and the lock we are holding guards nothing.
+     *
+     * **The mismatch branch is NOT MEASURED.** Staging it takes a real race between a sweep and an
+     * acquisition; nothing in a single-threaded test can produce it, and a test that spawned
+     * processes and hoped for the interleaving would be flaky rather than a check. What IS measured
+     * is the agreement path — every `acquire()` in the suite goes through this method.
+     *
+     * On Windows `fstat()` reports `ino` as 0, so the comparison degenerates to `0 === 0` and the
+     * check simply does not fire there. That is a degradation, not a break: the sweep is the only
+     * thing that creates the window, and it is as rare as the threshold above.
+     *
+     * @param resource $handle
+     */
+    private static function stillTheSameFile($handle, string $path): bool
+    {
+        $held = fstat($handle);
+        $named = @stat($path);
+
+        // Either question going unanswered is treated as "not the same file": the caller then
+        // retries and, if it keeps failing, proceeds unguarded. Assuming agreement on the strength
+        // of a failed `stat()` would be assuming exactly what this method exists to establish.
+        if ($held === false || $named === false) {
+            return false;
+        }
+
+        return $held['ino'] === $named['ino'] && $held['dev'] === $named['dev'];
+    }
+
+    /**
+     * Deletes lock files that nobody holds and nobody has touched for {@see self::STALE_AFTER_SECONDS}.
+     *
+     * Two conditions, and both are load-bearing. Age alone would delete the file of a run that has
+     * simply been going for a long time. "Nobody holds it" alone would delete the file of every
+     * environment that merely happens to be idle this second, and churn the directory for nothing.
+     *
+     * "Nobody holds it" is asked of the operating system rather than of the record inside the file:
+     * a pid written down says nothing about whether that process is alive, and pids are reissued.
+     * Opening with `r+` and not `c` matters — `c` would recreate a file another sweeper has just
+     * deleted.
+     *
+     * Failure is silence by design. A directory somebody else owns, a file without write
+     * permission, a race with another sweeper: none of it is a reason to fail a test run, and the
+     * only cost of not sweeping is a hundred bytes.
+     */
+    private static function sweepStale(string $directory, string $ourPath): void
+    {
+        $deadline = time() - self::STALE_AFTER_SECONDS;
+
+        foreach (glob($directory . '/*.lock') ?: [] as $candidate) {
+            if ($candidate === $ourPath) {
+                continue;
+            }
+
+            $modified = @filemtime($candidate);
+
+            if ($modified === false || $modified > $deadline) {
+                continue;
+            }
+
+            $handle = @fopen($candidate, 'r+');
+
+            if ($handle === false) {
+                continue;
+            }
+
+            // Somebody holds it — old or not, it is a live run.
+            if (flock($handle, LOCK_EX | LOCK_NB)) {
+                // Under our own lock, so that a process which opened this file before us cannot
+                // believe it took the environment: its {@see self::stillTheSameFile()} will find
+                // the name gone and retry.
+                @unlink($candidate);
+            }
+
+            fclose($handle);
+        }
     }
 
     private static function record(TestbenchConfig $config): string

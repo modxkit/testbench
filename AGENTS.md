@@ -69,7 +69,11 @@ the code under test reads.
 **1. DDL breaks the test transaction.** Isolation is a transaction rolled back after every test. In
 MySQL a `CREATE TABLE` commits implicitly, so a test that creates tables — anything with
 `->tables(...)` in its `PackageDefinition` — must `use ModxKit\Testbench\Concerns\RefreshesDatabase`.
-`TransactionLostException` means exactly this and nothing else. DX guide, section 4.
+`TransactionLostException` means exactly this and nothing else. DX guide, section 4. It is not free:
+it restores the baseline after **every** test of the class — 70 `CREATE TABLE` on a stock MODX,
+0.7 s at best and several seconds against a DBMS configured for durability. Put it on the classes
+that need it, never on a base class for the whole suite, and bring up the DBMS with the package's
+own `ci/docker-compose.yml`.
 
 **2. Permissions are not checked unless you ask.** `modX::checkPolicy()` evaluates a policy only with
 an initialised session, and under PHPUnit there is none: without help it answers "allowed" to

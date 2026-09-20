@@ -167,6 +167,17 @@ and the remaining tests of the run go over a polluted environment — recreate i
 (MODX_TESTBENCH_FORCE_INSTALL=1 or `bin/modx-testbench destroy`) before trusting their results.
 ```
 
+**What it costs, so that the bill does not arrive as a surprise.** `RefreshesDatabase` restores the
+baseline snapshot after **every** test of the class, and a stock MODX baseline is 70 `CREATE TABLE`
+against 28 rows of data: what is paid for is the DDL, not the volume. Measured on the development
+machine of this package (macOS, Docker Desktop, `mysql:8.0`, a 168 KB snapshot): 3.4–4.1 s per
+restore with a DBMS configured for durability, 0.72–0.75 s with the settings
+[`ci/docker-compose.yml`](https://github.com/modxkit/testbench/blob/main/ci/docker-compose.yml) now
+ships — the file explains which ones and why. Over dozens of tests that is the difference between
+seconds and minutes, and it looks exactly like a regression of the package until it is measured.
+Hence the rule: the trait goes on the classes that need it, never on the base class of the whole
+suite.
+
 The detector consists of three independent checks and catches four ways of losing isolation:
 
 | What happened                             | What catches it                                                                           |
@@ -685,13 +696,14 @@ The boundary of level 1 runs like this:
 
 ## 7. Speed
 
-| Technique                                                                                     | What it gives                                                      |
-| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| Do not delete the workspace between runs                                                      | The installation happens once, after which the start takes seconds |
-| `MODX_TESTBENCH_CORE_PATH` pointing at a local installation (`MODX_TESTBENCH_PROVIDER=local`) | Downloading the distribution is skipped                            |
-| The release cache (`MODX_TESTBENCH_CACHE_DIR`) in CI                                          | The core archive is not downloaded on every run                    |
-| `RefreshesDatabase` where it is needed, not globally                                          | Restoring the dump is not paid for where a transaction is enough   |
-| Splitting the `unit` / `integration` suites                                                   | The fast development loop runs over the unit suite                 |
+| Technique                                                                                     | What it gives                                                       |
+| --------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| Do not delete the workspace between runs                                                      | The installation happens once, after which the start takes seconds  |
+| `MODX_TESTBENCH_CORE_PATH` pointing at a local installation (`MODX_TESTBENCH_PROVIDER=local`) | Downloading the distribution is skipped                             |
+| The release cache (`MODX_TESTBENCH_CACHE_DIR`) in CI                                          | The core archive is not downloaded on every run                     |
+| `RefreshesDatabase` where it is needed, not globally                                          | Restoring the dump is not paid for where a transaction is enough    |
+| A DBMS configured for a test database, not for durability                                     | A restore of the baseline costs a fraction of a second, not seconds |
+| Splitting the `unit` / `integration` suites                                                   | The fast development loop runs over the unit suite                  |
 
 To rebuild the environment from scratch: `MODX_TESTBENCH_FORCE_INSTALL=1 vendor/bin/phpunit` or `vendor/bin/modx-testbench install --force`.
 
@@ -773,7 +785,9 @@ is released by the operating system together with the process that took it — a
 `kill -9` frees the environment, and there is no stale lock to clean up by hand. Subprocesses of the
 run are not another run: the build script of a transport package boots the very same environment,
 and it is let through. Where the guard cannot be taken at all — a private cache directory that
-cannot be created — the run proceeds unguarded rather than failing.
+cannot be created — the run proceeds unguarded rather than failing. The lock files do not pile up: a file
+nobody holds and nobody has touched for a week is deleted by the next run that passes through the
+directory, and it costs nothing — the next run that needs it creates it again.
 
 `MODX_TESTBENCH_ALLOW_CONCURRENT=1` switches the guard off. It is for the case where several
 processes over ONE environment are deliberate — a parallel runner, for instance. The package does
