@@ -21,6 +21,10 @@ vendor/bin/modx-testbench status
 It prints where the environment is, whether it is installed and what it was installed with. The
 other commands are `install`, `destroy` and `snapshot`.
 
+The MODX core lives in that environment directory, not in `vendor/`. Its source is `<environment
+directory>/core/src/Revolution/`; read it there rather than trusting an editor that reports a MODX
+method as undefined — the DX guide's FAQ explains why that happens.
+
 Level 2 needs a DBMS. A container is shipped with the package:
 
 ```bash

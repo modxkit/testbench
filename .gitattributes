@@ -14,8 +14,10 @@
 
 /src            -export-ignore
 /src/**         -export-ignore
-/stubs          -export-ignore
-/stubs/**       -export-ignore
+# stubs/ is deliberately NOT listed. It declares only the MODX members this package calls and
+# exists for its own PHPStan (`scanDirectories` in phpstan.neon); nothing loads it at run time.
+# Shipped, it sat in the consumer's vendor/, where the editor indexed it as the real MODX — and
+# reported, for instance, `modCacheManager::refresh()` as undefined, since the class is empty there.
 /bin            -export-ignore
 /bin/**         -export-ignore
 # ci/ is opened by the single file the documentation tells a consumer to run

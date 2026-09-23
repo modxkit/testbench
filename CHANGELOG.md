@@ -4,6 +4,32 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.5.1 — 2026-09-23
+
+### Fixed
+
+- **`stubs/modx-revolution.php` is no longer shipped into `vendor/`.** It declares only the
+  MODX members this package calls and exists for the package's own static analysis; nothing
+  loads it at run time. In a consumer's `vendor/`, though, the editor indexed it as the real
+  MODX and reported real methods as undefined — `modCacheManager::refresh()` in the report
+  that led here, since the class is declared empty in that file. Tests are unaffected: they
+  have always run against the real core in the environment directory. After
+  `composer update modxkit/testbench` the file is gone.
+
+### Added
+
+- **How to give the editor the real MODX API** — a new FAQ entry in the DX guide: add
+  `<environment directory>/core` to the editor's include paths, with the settings for
+  PhpStorm and Intelephense, and why the default directory name makes that path go stale.
+  `AGENTS.md` points an agent at the core's source in the same directory.
+
+### Changed
+
+- The comment in `PhpDumper::load()` on sending the snapshot one statement at a time now
+  carries the measurement behind it: parsing the file costs 0.019 s of a 0.71–0.79 s
+  restore, and batches of 10, 50 and 1000 statements took 0.67, 0.65 and 0.85 s — within
+  the spread.
+
 ## 1.5.0 — 2026-09-20
 
 ### Added

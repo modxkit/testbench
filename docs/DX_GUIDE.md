@@ -1032,6 +1032,30 @@ it: `require`, `vendor/modxkit/testbench/…` and the workflow's `uses:`; the na
 Both suites were run in a single process. Run `--testsuite unit` and `--testsuite integration`
 separately — section 9.
 
+### The editor reports a MODX method as undefined, though the tests pass
+
+For example `modCacheManager::refresh()`. Up to 1.5.0 the package shipped `stubs/modx-revolution.php`
+into `vendor/`: declarations of MODX classes for this package's own static analysis, holding only the
+members the package itself calls (`modCacheManager` is empty there). Nothing loads that file at run
+time, but an editor indexes `vendor/` and took it for the real MODX. Since 1.5.1 it is no longer
+shipped — `composer update modxkit/testbench` removes it.
+
+That leaves the editor with no MODX classes at all: the core is not a Composer dependency, it lives in
+the environment directory. To get the real API — every class, with the core's own docblocks — add
+`<environment directory>/core` to what your editor indexes besides the project;
+`vendor/bin/modx-testbench status` prints the environment directory. xPDO comes with it, under
+`core/vendor/`. For example:
+
+- PhpStorm: Settings → PHP → Include path;
+- VS Code with Intelephense: `intelephense.environment.includePaths` in the workspace settings;
+- other editors: whatever they call include paths or external libraries.
+
+The default directory name is the configuration fingerprint (see "What exactly causes a reinstall" in
+the README), so a different MODX version or different database credentials move the core to another
+directory and the path in the editor goes stale. A stable path is `MODX_TESTBENCH_WORKSPACE` set to a
+directory of its own — but the package deletes that directory in full on every reinstall (see the
+README), so never point it at anything you keep.
+
 ### How to find out where testbench put everything
 
 ```bash

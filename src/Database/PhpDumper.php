@@ -195,6 +195,14 @@ final class PhpDumper implements Dumper
             // Statements are executed one by one rather than as the whole file at once: this way
             // the size of a single packet stays predictable, and the diagnostics show the specific
             // statement the restore stumbled on.
+            //
+            // Nor is it slower. Measured on the development machine against `mysql:8.0` with the
+            // shipped ci/docker-compose.yml and the snapshot of a stock 3.2.3-pl (168 KB, 70
+            // tables, 170 statements), medians: parsing the file in PHP costs 0.019 s of the
+            // 0.71-0.79 s the whole restore takes — the rest is the server building 70 tables.
+            // Batches of 10, 50 and 1000 statements (`query()` walked with `nextRowset()`, since
+            // `exec()` does not report errors of every statement in a batch) took 0.67, 0.65 and
+            // 0.85 s: within the spread, not a gain.
             foreach ($this->statements($handle, $file) as $statement) {
                 ++$number;
 
